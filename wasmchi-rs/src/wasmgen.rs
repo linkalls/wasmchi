@@ -53,6 +53,7 @@ fn ensure_start(prog: &mut Program) {
         0,
         FnDecl {
             exported: false,
+            inline: false,
             name: "_start".to_string(),
             params: vec![],
             ret: TypeName::Void,
@@ -101,15 +102,17 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
     // inline-only helpers:
     // - i32 fn with single `return <expr>;`
     // - void fn with only `expr; expr; ...` (no let/assign/if/while/return)
+    //
+    // If a function is marked `@inline`, it MUST be inlineable, otherwise compilation errors.
     let mut inline_map = std::collections::HashMap::<String, (Vec<String>, Expr)>::new();
     let mut inline_void = std::collections::HashMap::<String, (Vec<String>, Vec<Expr>)>::new();
     for f in &prog.fns {
-        if f.exported {
-            continue;
+        if f.inline && f.exported {
+            bail!("@inline function '{}' cannot be exported (not supported yet)", f.name);
         }
 
-        // i32 return-expr inline
-        if f.ret == TypeName::I32 && f.body.len() == 1 {
+        // i32 return-expr inline (only for non-exported helpers)
+        if !f.exported && f.ret == TypeName::I32 && f.body.len() == 1 {
             if let Stmt::Return(Some(expr)) = &f.body[0] {
                 let params = f.params.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
                 inline_map.insert(f.name.clone(), (params, expr.clone()));
@@ -117,8 +120,8 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
             }
         }
 
-        // void expr-stmt inline
-        if f.ret == TypeName::Void {
+        // void expr-stmt inline (only for non-exported helpers)
+        if !f.exported && f.ret == TypeName::Void {
             let mut exprs = Vec::new();
             let mut ok = true;
             for st in &f.body {
@@ -135,6 +138,10 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                 inline_void.insert(f.name.clone(), (params, exprs));
                 continue;
             }
+        }
+
+        if f.inline {
+            bail!("@inline function '{}' is not inlineable: only `i32 fn {{ return <expr>; }}` or `void fn {{ expr; ... }}` are supported", f.name);
         }
     }
 
@@ -573,12 +580,20 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
         let mut i = 0usize;
         while i < instrs.len() {
             if i + 1 < instrs.len() {
+                // local.set x; local.get x  => local.tee x
                 if let (Instruction::LocalSet(a), Instruction::LocalGet(b)) = (&instrs[i], &instrs[i + 1]) {
                     if a == b {
                         p.push(Instruction::LocalTee(*a));
                         i += 2;
                         continue;
                     }
+                }
+
+                // i32.const 0; i32.eq => i32.eqz
+                if let (Instruction::I32Const(0), Instruction::I32Eq) = (&instrs[i], &instrs[i + 1]) {
+                    p.push(Instruction::I32Eqz);
+                    i += 2;
+                    continue;
                 }
             }
             p.push(instrs[i].clone());

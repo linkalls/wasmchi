@@ -24,6 +24,7 @@ pub struct ConstDecl {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub exported: bool,
+    pub inline: bool,
     pub name: String,
     pub params: Vec<(String, TypeName)>,
     pub ret: TypeName,
@@ -281,11 +282,13 @@ fn parse_fn(p: &mut P) -> Result<FnDecl> {
     let exported = p.eat(Tok::Export);
 
     // optional attribute: @inline
+    let mut inline = false;
     if p.eat(Tok::At) {
         let a = p.expect_ident()?;
         if a != "inline" {
             bail!("unknown attribute @{a}");
         }
+        inline = true;
     }
 
     p.expect(Tok::Fn)?;
@@ -311,6 +314,7 @@ fn parse_fn(p: &mut P) -> Result<FnDecl> {
     let body = parse_block(p)?;
     Ok(FnDecl {
         exported,
+        inline,
         name,
         params,
         ret,
