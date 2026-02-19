@@ -605,6 +605,18 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
         let mut i = 0usize;
         while i < instrs.len() {
             if i + 1 < instrs.len() {
+                // drop elimination (side-effect free):
+                //   local.get x; drop  => <nothing>
+                //   i32.const k; drop  => <nothing>
+                if matches!((&instrs[i], &instrs[i + 1]), (Instruction::LocalGet(_), Instruction::Drop)) {
+                    i += 2;
+                    continue;
+                }
+                if matches!((&instrs[i], &instrs[i + 1]), (Instruction::I32Const(_), Instruction::Drop)) {
+                    i += 2;
+                    continue;
+                }
+
                 // local.set x; local.get x  => local.tee x
                 if let (Instruction::LocalSet(a), Instruction::LocalGet(b)) = (&instrs[i], &instrs[i + 1]) {
                     if a == b {
