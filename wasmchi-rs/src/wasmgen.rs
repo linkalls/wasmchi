@@ -599,15 +599,14 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
 
         instrs.push(Instruction::End);
 
-        // peephole: local.set x; local.get x  => local.tee x
-        // (safe because it preserves the stack value while writing the local)
-        let mut p: Vec<Instruction> = Vec::with_capacity(instrs.len());
+        // peephole / cleanup passes.
+        // Pass1: simple pair patterns + algebraic identities.
+        let mut p1: Vec<Instruction> = Vec::with_capacity(instrs.len());
         let mut i = 0usize;
         while i < instrs.len() {
             if i + 1 < instrs.len() {
-                // drop elimination (side-effect free):
-                //   local.get x; drop  => <nothing>
-                //   i32.const k; drop  => <nothing>
+                // local.get x; drop  => <nothing>
+                // i32.const k; drop  => <nothing>
                 if matches!((&instrs[i], &instrs[i + 1]), (Instruction::LocalGet(_), Instruction::Drop)) {
                     i += 2;
                     continue;
@@ -620,7 +619,7 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                 // local.set x; local.get x  => local.tee x
                 if let (Instruction::LocalSet(a), Instruction::LocalGet(b)) = (&instrs[i], &instrs[i + 1]) {
                     if a == b {
-                        p.push(Instruction::LocalTee(*a));
+                        p1.push(Instruction::LocalTee(*a));
                         i += 2;
                         continue;
                     }
@@ -628,34 +627,29 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
 
                 // i32.const 0; i32.eq => i32.eqz
                 if let (Instruction::I32Const(0), Instruction::I32Eq) = (&instrs[i], &instrs[i + 1]) {
-                    p.push(Instruction::I32Eqz);
+                    p1.push(Instruction::I32Eqz);
                     i += 2;
                     continue;
                 }
 
                 // algebraic identities (when constant is the RHS):
-                //   x + 0 => x
-                //   x | 0 => x
-                //   x ^ 0 => x
-                //   x * 1 => x
-                //   x & -1 => x
-                //   x << 0 => x
-                //   x >> 0 => x
                 match (&instrs[i], &instrs[i + 1]) {
+                    // x + 0, x | 0, x ^ 0, x << 0, x >> 0
                     (Instruction::I32Const(0), Instruction::I32Add)
                     | (Instruction::I32Const(0), Instruction::I32Or)
                     | (Instruction::I32Const(0), Instruction::I32Xor)
                     | (Instruction::I32Const(0), Instruction::I32Shl)
                     | (Instruction::I32Const(0), Instruction::I32ShrU)
                     | (Instruction::I32Const(0), Instruction::I32ShrS) => {
-                        // drop const+op
                         i += 2;
                         continue;
                     }
+                    // x * 1
                     (Instruction::I32Const(1), Instruction::I32Mul) => {
                         i += 2;
                         continue;
                     }
+                    // x & -1
                     (Instruction::I32Const(-1), Instruction::I32And) => {
                         i += 2;
                         continue;
@@ -663,8 +657,80 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                     _ => {}
                 }
             }
-            p.push(instrs[i].clone());
+            p1.push(instrs[i].clone());
             i += 1;
+        }
+
+        // Pass2: stack-effect based drop DCE.
+        // If we see: <pure i32-producing sequence>; drop, remove the whole sequence.
+        fn se(instr: &Instruction) -> Option<(i32, i32, bool)> {
+            use Instruction::*;
+            Some(match instr {
+                I32Const(_) => (0, 1, true),
+                LocalGet(_) => (0, 1, true),
+
+                // pure unary
+                I32Eqz => (1, 1, true),
+
+                // pure binary
+                I32Add | I32Sub | I32Mul | I32And | I32Or | I32Xor | I32Shl | I32ShrS | I32ShrU => (2, 1, true),
+                I32Eq | I32Ne | I32LtS | I32LeS | I32GtS | I32GeS => (2, 1, true),
+
+                // drop itself
+                Drop => (1, 0, true),
+
+                // anything else: treat as barrier (side effects or control flow)
+                _ => return None,
+            })
+        }
+
+        let mut out: Vec<Instruction> = Vec::with_capacity(p1.len());
+        let mut k = 0usize;
+        while k < p1.len() {
+            if matches!(p1[k], Instruction::Drop) {
+                // try to delete the producer of the dropped value
+                let mut need: i32 = 1; // how many stack values we need to account for
+                let mut j = k;
+                let mut ok = true;
+                while j > 0 {
+                    j -= 1;
+                    let Some((pop, push, pure)) = se(&p1[j]) else {
+                        ok = false;
+                        break;
+                    };
+                    if !pure {
+                        ok = false;
+                        break;
+                    }
+                    // this instruction contributes `push` values; we are tracing backwards
+                    need += pop - push;
+                    if need <= 0 {
+                        // we consumed the entire producer stack slice
+                        break;
+                    }
+                }
+
+                if ok && need <= 0 {
+                    // drop instructions in out corresponding to p1[j..k] (producer + drop)
+                    // Since out is built sequentially, and p1[j..k] are the last emitted,
+                    // we can pop them if lengths match.
+                    let slice_len = k - j; // producer length
+                    if out.len() >= slice_len {
+                        out.truncate(out.len() - slice_len);
+                        // also skip emitting the drop
+                        k += 1;
+                        continue;
+                    }
+                }
+
+                // fallback: keep the drop
+                out.push(p1[k].clone());
+                k += 1;
+                continue;
+            }
+
+            out.push(p1[k].clone());
+            k += 1;
         }
 
         // locals grouping: one group of i32 locals
@@ -672,7 +738,7 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
         if local_count > 0 {
             func = Function::new(vec![(local_count, ValType::I32)]);
         }
-        for ins in p {
+        for ins in out {
             func.instruction(&ins);
         }
 
