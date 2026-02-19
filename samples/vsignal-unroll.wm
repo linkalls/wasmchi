@@ -1,0 +1,236 @@
+// vsignal bitset version written with tiny helper fns that should be auto-inlined
+
+fn malloc(size: i32): i32 {
+  let hp: i32 = load_i32(0);
+  let ptr: i32 = hp;
+  store_i32(0, hp + size);
+  return ptr;
+}
+
+fn node_ptr(g: i32, id: i32): i32 {
+  return g + (id << 8) + (id << 2);
+}
+
+fn word_idx(id: i32): i32 {
+  return id >> 5;
+}
+
+fn bit_mask(id: i32): i32 {
+  return 1 << (id & 31);
+}
+
+export fn init_graph(): i32 {
+  let g: i32 = malloc(1098248);
+  store_i32(g + 1064960, 0);
+  store_i32(g + 1081348, 0);
+  return g;
+}
+
+export fn create_node(g: i32): i32 {
+  let id: i32 = load_i32(g + 1064960);
+  store_i32(g + 1064960, id + 1);
+  return id;
+}
+
+export fn add_dependency(g: i32, dependent: i32, dependency: i32) {
+  let np: i32 = node_ptr(g, dependency);
+  let cnt: i32 = load_i32(np + 256);
+  if cnt > 0 {
+    let last: i32 = load_i32(np + (cnt - 1) * 4);
+    if last == dependent {
+      return;
+    }
+  }
+  store_i32(np + cnt * 4, dependent);
+  store_i32(np + 256, cnt + 1);
+}
+
+export fn propagate(g: i32, source_id: i32): i32 {
+  let update_base: i32 = g + 1064964;
+  let visited_base: i32 = g + 1081352;
+  let queue_base: i32 = g + 1081864;
+
+  store_i32(g + 1081348, 0);
+
+  // unrolled clear visited_words[128]
+  store_i32(visited_base + 0 * 4, 0);
+  store_i32(visited_base + 1 * 4, 0);
+  store_i32(visited_base + 2 * 4, 0);
+  store_i32(visited_base + 3 * 4, 0);
+  store_i32(visited_base + 4 * 4, 0);
+  store_i32(visited_base + 5 * 4, 0);
+  store_i32(visited_base + 6 * 4, 0);
+  store_i32(visited_base + 7 * 4, 0);
+  store_i32(visited_base + 8 * 4, 0);
+  store_i32(visited_base + 9 * 4, 0);
+  store_i32(visited_base + 10 * 4, 0);
+  store_i32(visited_base + 11 * 4, 0);
+  store_i32(visited_base + 12 * 4, 0);
+  store_i32(visited_base + 13 * 4, 0);
+  store_i32(visited_base + 14 * 4, 0);
+  store_i32(visited_base + 15 * 4, 0);
+  store_i32(visited_base + 16 * 4, 0);
+  store_i32(visited_base + 17 * 4, 0);
+  store_i32(visited_base + 18 * 4, 0);
+  store_i32(visited_base + 19 * 4, 0);
+  store_i32(visited_base + 20 * 4, 0);
+  store_i32(visited_base + 21 * 4, 0);
+  store_i32(visited_base + 22 * 4, 0);
+  store_i32(visited_base + 23 * 4, 0);
+  store_i32(visited_base + 24 * 4, 0);
+  store_i32(visited_base + 25 * 4, 0);
+  store_i32(visited_base + 26 * 4, 0);
+  store_i32(visited_base + 27 * 4, 0);
+  store_i32(visited_base + 28 * 4, 0);
+  store_i32(visited_base + 29 * 4, 0);
+  store_i32(visited_base + 30 * 4, 0);
+  store_i32(visited_base + 31 * 4, 0);
+  store_i32(visited_base + 32 * 4, 0);
+  store_i32(visited_base + 33 * 4, 0);
+  store_i32(visited_base + 34 * 4, 0);
+  store_i32(visited_base + 35 * 4, 0);
+  store_i32(visited_base + 36 * 4, 0);
+  store_i32(visited_base + 37 * 4, 0);
+  store_i32(visited_base + 38 * 4, 0);
+  store_i32(visited_base + 39 * 4, 0);
+  store_i32(visited_base + 40 * 4, 0);
+  store_i32(visited_base + 41 * 4, 0);
+  store_i32(visited_base + 42 * 4, 0);
+  store_i32(visited_base + 43 * 4, 0);
+  store_i32(visited_base + 44 * 4, 0);
+  store_i32(visited_base + 45 * 4, 0);
+  store_i32(visited_base + 46 * 4, 0);
+  store_i32(visited_base + 47 * 4, 0);
+  store_i32(visited_base + 48 * 4, 0);
+  store_i32(visited_base + 49 * 4, 0);
+  store_i32(visited_base + 50 * 4, 0);
+  store_i32(visited_base + 51 * 4, 0);
+  store_i32(visited_base + 52 * 4, 0);
+  store_i32(visited_base + 53 * 4, 0);
+  store_i32(visited_base + 54 * 4, 0);
+  store_i32(visited_base + 55 * 4, 0);
+  store_i32(visited_base + 56 * 4, 0);
+  store_i32(visited_base + 57 * 4, 0);
+  store_i32(visited_base + 58 * 4, 0);
+  store_i32(visited_base + 59 * 4, 0);
+  store_i32(visited_base + 60 * 4, 0);
+  store_i32(visited_base + 61 * 4, 0);
+  store_i32(visited_base + 62 * 4, 0);
+  store_i32(visited_base + 63 * 4, 0);
+  store_i32(visited_base + 64 * 4, 0);
+  store_i32(visited_base + 65 * 4, 0);
+  store_i32(visited_base + 66 * 4, 0);
+  store_i32(visited_base + 67 * 4, 0);
+  store_i32(visited_base + 68 * 4, 0);
+  store_i32(visited_base + 69 * 4, 0);
+  store_i32(visited_base + 70 * 4, 0);
+  store_i32(visited_base + 71 * 4, 0);
+  store_i32(visited_base + 72 * 4, 0);
+  store_i32(visited_base + 73 * 4, 0);
+  store_i32(visited_base + 74 * 4, 0);
+  store_i32(visited_base + 75 * 4, 0);
+  store_i32(visited_base + 76 * 4, 0);
+  store_i32(visited_base + 77 * 4, 0);
+  store_i32(visited_base + 78 * 4, 0);
+  store_i32(visited_base + 79 * 4, 0);
+  store_i32(visited_base + 80 * 4, 0);
+  store_i32(visited_base + 81 * 4, 0);
+  store_i32(visited_base + 82 * 4, 0);
+  store_i32(visited_base + 83 * 4, 0);
+  store_i32(visited_base + 84 * 4, 0);
+  store_i32(visited_base + 85 * 4, 0);
+  store_i32(visited_base + 86 * 4, 0);
+  store_i32(visited_base + 87 * 4, 0);
+  store_i32(visited_base + 88 * 4, 0);
+  store_i32(visited_base + 89 * 4, 0);
+  store_i32(visited_base + 90 * 4, 0);
+  store_i32(visited_base + 91 * 4, 0);
+  store_i32(visited_base + 92 * 4, 0);
+  store_i32(visited_base + 93 * 4, 0);
+  store_i32(visited_base + 94 * 4, 0);
+  store_i32(visited_base + 95 * 4, 0);
+  store_i32(visited_base + 96 * 4, 0);
+  store_i32(visited_base + 97 * 4, 0);
+  store_i32(visited_base + 98 * 4, 0);
+  store_i32(visited_base + 99 * 4, 0);
+  store_i32(visited_base + 100 * 4, 0);
+  store_i32(visited_base + 101 * 4, 0);
+  store_i32(visited_base + 102 * 4, 0);
+  store_i32(visited_base + 103 * 4, 0);
+  store_i32(visited_base + 104 * 4, 0);
+  store_i32(visited_base + 105 * 4, 0);
+  store_i32(visited_base + 106 * 4, 0);
+  store_i32(visited_base + 107 * 4, 0);
+  store_i32(visited_base + 108 * 4, 0);
+  store_i32(visited_base + 109 * 4, 0);
+  store_i32(visited_base + 110 * 4, 0);
+  store_i32(visited_base + 111 * 4, 0);
+  store_i32(visited_base + 112 * 4, 0);
+  store_i32(visited_base + 113 * 4, 0);
+  store_i32(visited_base + 114 * 4, 0);
+  store_i32(visited_base + 115 * 4, 0);
+  store_i32(visited_base + 116 * 4, 0);
+  store_i32(visited_base + 117 * 4, 0);
+  store_i32(visited_base + 118 * 4, 0);
+  store_i32(visited_base + 119 * 4, 0);
+  store_i32(visited_base + 120 * 4, 0);
+  store_i32(visited_base + 121 * 4, 0);
+  store_i32(visited_base + 122 * 4, 0);
+  store_i32(visited_base + 123 * 4, 0);
+  store_i32(visited_base + 124 * 4, 0);
+  store_i32(visited_base + 125 * 4, 0);
+  store_i32(visited_base + 126 * 4, 0);
+  store_i32(visited_base + 127 * 4, 0);
+
+  let q_head: i32 = 0;
+  let q_tail: i32 = 0;
+
+  let srcp: i32 = node_ptr(g, source_id);
+  let cnt: i32 = load_i32(srcp + 256);
+  let i: i32 = 0;
+  while i < cnt {
+    let dep: i32 = load_i32(srcp + i * 4);
+    store_i32(queue_base + q_tail * 4, dep);
+    q_tail = q_tail + 1;
+
+    let wi: i32 = word_idx(dep);
+    let addr: i32 = visited_base + (wi << 2);
+    let word: i32 = load_i32(addr);
+    store_i32(addr, word | bit_mask(dep));
+
+    i = i + 1;
+  }
+
+  while q_head < q_tail {
+    let curr: i32 = load_i32(queue_base + q_head * 4);
+    q_head = q_head + 1;
+
+    let uc: i32 = load_i32(g + 1081348);
+    store_i32(update_base + uc * 4, curr);
+    store_i32(g + 1081348, uc + 1);
+
+    let cp: i32 = node_ptr(g, curr);
+    let dcnt: i32 = load_i32(cp + 256);
+    let j: i32 = 0;
+    while j < dcnt {
+      let dep2: i32 = load_i32(cp + j * 4);
+
+      let wi2: i32 = word_idx(dep2);
+      let mask2: i32 = bit_mask(dep2);
+      let word2: i32 = load_i32(visited_base + (wi2 << 2));
+      if (word2 & mask2) == 0 {
+        store_i32(visited_base + (wi2 << 2), word2 | mask2);
+        store_i32(queue_base + q_tail * 4, dep2);
+        q_tail = q_tail + 1;
+      }
+
+      j = j + 1;
+    }
+  }
+
+  return load_i32(g + 1081348);
+}
+
+export fn get_update_buffer_ptr(g: i32): i32 {
+  return g + 1064964;
+}

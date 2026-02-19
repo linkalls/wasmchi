@@ -1,0 +1,6 @@
+fn main() {
+  // store 42 at address 0
+  store_i32(0, 42);
+  let x: i32 = load_i32(0);
+  println_i32(x);
+}

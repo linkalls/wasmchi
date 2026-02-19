@@ -1,0 +1,121 @@
+// wasmchi vsignal replacement for vitrio
+
+fn malloc(size: i32): i32 {
+  let hp: i32 = load_i32(0);
+  let ptr: i32 = hp;
+  store_i32(0, hp + size);
+  return ptr;
+}
+
+fn node_ptr(g: i32, id: i32): i32 {
+  // NODE_SIZE = 260 = 256 + 4 (avoid mul)
+  return g + (id << 8) + (id << 2);
+}
+
+export fn init_graph(): i32 {
+  // GRAPH_SIZE = 1098248
+  let g: i32 = malloc(1098248);
+  // node_count offset = 1064960
+  store_i32(g + 1064960, 0);
+  // update_count offset = 1081348
+  store_i32(g + 1081348, 0);
+  return g;
+}
+
+export fn create_node(g: i32): i32 {
+  let id: i32 = load_i32(g + 1064960);
+  store_i32(g + 1064960, id + 1);
+  return id;
+}
+
+export fn add_dependency(g: i32, dependent: i32, dependency: i32) {
+  let np: i32 = node_ptr(g, dependency);
+  // dep_count offset in Node = 256
+  let cnt: i32 = load_i32(np + 256);
+  if cnt > 0 {
+    let last: i32 = load_i32(np + (cnt - 1) * 4);
+    if last == dependent {
+      return;
+    }
+  }
+  store_i32(np + cnt * 4, dependent);
+  store_i32(np + 256, cnt + 1);
+}
+
+fn visited_get(g: i32, id: i32): i32 {
+  let word_idx: i32 = id >> 5;
+  let mask: i32 = 1 << (id & 31);
+  // VISITED_OFFSET = 1081352
+  let word: i32 = load_i32(g + 1081352 + word_idx * 4);
+  return word & mask;
+}
+
+fn visited_set(g: i32, id: i32) {
+  let word_idx: i32 = id >> 5;
+  let mask: i32 = 1 << (id & 31);
+  let addr: i32 = g + 1081352 + word_idx * 4;
+  let word: i32 = load_i32(addr);
+  store_i32(addr, word | mask);
+}
+
+export fn propagate(g: i32, source_id: i32): i32 {
+  let update_base: i32 = g + 1064964;
+  let update_count_addr: i32 = g + 1081348;
+  let visited_base: i32 = g + 1081352;
+  let queue_base: i32 = g + 1081864;
+
+  // local update_count (avoid load/store per iteration)
+  let uc: i32 = 0;
+
+  // clear visited_words[128]
+  let vi: i32 = 0;
+  while vi < 128 {
+    store_i32(visited_base + vi * 4, 0);
+    vi = vi + 1;
+  }
+
+  // q_head/q_tail
+  let q_head: i32 = 0;
+  let q_tail: i32 = 0;
+
+  // seed queue with source dependents
+  let srcp: i32 = node_ptr(g, source_id);
+  let cnt: i32 = load_i32(srcp + 256);
+  let i: i32 = 0;
+  while i < cnt {
+    let dep: i32 = load_i32(srcp + i * 4);
+    store_i32(queue_base + q_tail * 4, dep);
+    q_tail = q_tail + 1;
+    visited_set(g, dep);
+    i = i + 1;
+  }
+
+  // BFS
+  while q_head < q_tail {
+    let curr: i32 = load_i32(queue_base + q_head * 4);
+    q_head = q_head + 1;
+
+    store_i32(update_base + uc * 4, curr);
+    uc = uc + 1;
+
+    let cp: i32 = node_ptr(g, curr);
+    let dcnt: i32 = load_i32(cp + 256);
+    let j: i32 = 0;
+    while j < dcnt {
+      let dep2: i32 = load_i32(cp + j * 4);
+      if visited_get(g, dep2) == 0 {
+        visited_set(g, dep2);
+        store_i32(queue_base + q_tail * 4, dep2);
+        q_tail = q_tail + 1;
+      }
+      j = j + 1;
+    }
+  }
+
+  store_i32(update_count_addr, uc);
+  return uc;
+}
+
+export fn get_update_buffer_ptr(g: i32): i32 {
+  return g + 1064964;
+}

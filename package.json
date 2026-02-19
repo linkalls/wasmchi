@@ -1,0 +1,18 @@
+{
+  "name": "wasmchi",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "node --watch dist/cli.js",
+    "compile:web": "node dist/cli.js build samples/hello.wm --target web --out out/web.wasm",
+    "compile:wasi": "node dist/cli.js build samples/hello.wm --target wasi --out out/wasi.wasm",
+    "run:web": "node scripts/run-web.mjs",
+    "run:wasi": "node scripts/run-wasi.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "@types/node": "^22.13.0"
+  }
+}

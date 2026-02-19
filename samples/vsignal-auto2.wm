@@ -1,0 +1,114 @@
+// vsignal-auto but refactors visited_set into a void helper (should be auto-inlined now)
+
+fn malloc(size: i32): i32 {
+  let hp: i32 = load_i32(0);
+  let ptr: i32 = hp;
+  store_i32(0, hp + size);
+  return ptr;
+}
+
+fn node_ptr(g: i32, id: i32): i32 {
+  return g + (id << 8) + (id << 2);
+}
+
+fn word_idx(id: i32): i32 {
+  return id >> 5;
+}
+
+fn bit_mask(id: i32): i32 {
+  return 1 << (id & 31);
+}
+
+fn visited_set(visited_base: i32, id: i32) {
+  let wi: i32 = word_idx(id);
+  let addr: i32 = visited_base + (wi << 2);
+  let word: i32 = load_i32(addr);
+  store_i32(addr, word | bit_mask(id));
+}
+
+export fn init_graph(): i32 {
+  let g: i32 = malloc(1098248);
+  store_i32(g + 1064960, 0);
+  store_i32(g + 1081348, 0);
+  return g;
+}
+
+export fn create_node(g: i32): i32 {
+  let id: i32 = load_i32(g + 1064960);
+  store_i32(g + 1064960, id + 1);
+  return id;
+}
+
+export fn add_dependency(g: i32, dependent: i32, dependency: i32) {
+  let np: i32 = node_ptr(g, dependency);
+  let cnt: i32 = load_i32(np + 256);
+  if cnt > 0 {
+    let last: i32 = load_i32(np + (cnt - 1) * 4);
+    if last == dependent {
+      return;
+    }
+  }
+  store_i32(np + cnt * 4, dependent);
+  store_i32(np + 256, cnt + 1);
+}
+
+export fn propagate(g: i32, source_id: i32): i32 {
+  let update_base: i32 = g + 1064964;
+  let visited_base: i32 = g + 1081352;
+  let queue_base: i32 = g + 1081864;
+
+  store_i32(g + 1081348, 0);
+
+  let vi: i32 = 0;
+  while vi < 128 {
+    store_i32(visited_base + vi * 4, 0);
+    vi = vi + 1;
+  }
+
+  let q_head: i32 = 0;
+  let q_tail: i32 = 0;
+
+  let srcp: i32 = node_ptr(g, source_id);
+  let cnt: i32 = load_i32(srcp + 256);
+  let i: i32 = 0;
+  while i < cnt {
+    let dep: i32 = load_i32(srcp + i * 4);
+    store_i32(queue_base + q_tail * 4, dep);
+    q_tail = q_tail + 1;
+    visited_set(visited_base, dep);
+    i = i + 1;
+  }
+
+  while q_head < q_tail {
+    let curr: i32 = load_i32(queue_base + q_head * 4);
+    q_head = q_head + 1;
+
+    let uc: i32 = load_i32(g + 1081348);
+    store_i32(update_base + uc * 4, curr);
+    store_i32(g + 1081348, uc + 1);
+
+    let cp: i32 = node_ptr(g, curr);
+    let dcnt: i32 = load_i32(cp + 256);
+    let j: i32 = 0;
+    while j < dcnt {
+      let dep2: i32 = load_i32(cp + j * 4);
+
+      let wi2: i32 = word_idx(dep2);
+      let mask2: i32 = bit_mask(dep2);
+      let word2: i32 = load_i32(visited_base + (wi2 << 2));
+      if (word2 & mask2) == 0 {
+        store_i32(visited_base + (wi2 << 2), word2 | mask2);
+        store_i32(queue_base + q_tail * 4, dep2);
+        q_tail = q_tail + 1;
+      }
+
+      j = j + 1;
+    }
+  }
+
+  return load_i32(g + 1081348);
+}
+
+export fn get_update_buffer_ptr(g: i32): i32 {
+  return g + 1064964;
+}

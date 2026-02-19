@@ -1,0 +1,5 @@
+@inline fn add4(x: i32): i32 { return x + 4; }
+
+export fn run(x: i32): i32 {
+  return add4(add4(x));
+}

@@ -1,0 +1,126 @@
+// vsignal variant: generation counter (no visited clear loop)
+
+fn malloc(size: i32): i32 {
+  let hp: i32 = load_i32(0);
+  let ptr: i32 = hp;
+  store_i32(0, hp + size);
+  return ptr;
+}
+
+fn node_ptr(g: i32, id: i32): i32 {
+  // 260 = 256 + 4
+  return g + (id << 8) + (id << 2);
+}
+
+// Layout:
+// nodes: 4096 * 260 bytes = 1,064,960
+// node_count @ 1,064,960
+// update_buffer @ 1,064,964 (4096 i32)
+// update_count  @ 1,081,348
+// visited_gen   @ 1,081,352 (4096 i32)
+// gen_counter   @ 1,097,736
+// queue         @ 1,097,740 (4096 i32)
+// total         @ 1,114,124
+
+export fn init_graph(): i32 {
+  let g: i32 = malloc(1114124);
+  store_i32(g + 1064960, 0);
+  store_i32(g + 1081348, 0);
+  store_i32(g + 1097736, 1); // gen_counter starts at 1
+  return g;
+}
+
+export fn create_node(g: i32): i32 {
+  let id: i32 = load_i32(g + 1064960);
+  store_i32(g + 1064960, id + 1);
+  return id;
+}
+
+export fn add_dependency(g: i32, dependent: i32, dependency: i32) {
+  let np: i32 = node_ptr(g, dependency);
+  let cnt: i32 = load_i32(np + 256);
+  if cnt > 0 {
+    let last: i32 = load_i32(np + (cnt - 1) * 4);
+    if last == dependent {
+      return;
+    }
+  }
+  store_i32(np + cnt * 4, dependent);
+  store_i32(np + 256, cnt + 1);
+}
+
+fn get_gen(g: i32): i32 {
+  return load_i32(g + 1097736);
+}
+
+fn bump_gen(g: i32): i32 {
+  let gen: i32 = load_i32(g + 1097736);
+  gen = gen + 1;
+  if gen == 0 {
+    // avoid 0 as valid gen; extremely unlikely, but safe
+    gen = 1;
+  }
+  store_i32(g + 1097736, gen);
+  return gen;
+}
+
+fn visited_get(g: i32, gen: i32, id: i32): i32 {
+  // visited_gen[id] == gen ? 1 : 0
+  let v: i32 = load_i32(g + 1081352 + id * 4);
+  if v == gen {
+    return 1;
+  }
+  return 0;
+}
+
+fn visited_set(g: i32, gen: i32, id: i32) {
+  store_i32(g + 1081352 + id * 4, gen);
+}
+
+export fn propagate(g: i32, source_id: i32): i32 {
+  store_i32(g + 1081348, 0);
+
+  let gen: i32 = bump_gen(g);
+
+  let q_head: i32 = 0;
+  let q_tail: i32 = 0;
+
+  let srcp: i32 = node_ptr(g, source_id);
+  let cnt: i32 = load_i32(srcp + 256);
+  let i: i32 = 0;
+  while i < cnt {
+    let dep: i32 = load_i32(srcp + i * 4);
+    store_i32(g + 1097740 + q_tail * 4, dep);
+    q_tail = q_tail + 1;
+    visited_set(g, gen, dep);
+    i = i + 1;
+  }
+
+  while q_head < q_tail {
+    let curr: i32 = load_i32(g + 1097740 + q_head * 4);
+    q_head = q_head + 1;
+
+    let uc: i32 = load_i32(g + 1081348);
+    store_i32(g + 1064964 + uc * 4, curr);
+    store_i32(g + 1081348, uc + 1);
+
+    let cp: i32 = node_ptr(g, curr);
+    let dcnt: i32 = load_i32(cp + 256);
+    let j: i32 = 0;
+    while j < dcnt {
+      let dep2: i32 = load_i32(cp + j * 4);
+      if visited_get(g, gen, dep2) == 0 {
+        visited_set(g, gen, dep2);
+        store_i32(g + 1097740 + q_tail * 4, dep2);
+        q_tail = q_tail + 1;
+      }
+      j = j + 1;
+    }
+  }
+
+  return load_i32(g + 1081348);
+}
+
+export fn get_update_buffer_ptr(g: i32): i32 {
+  return g + 1064964;
+}

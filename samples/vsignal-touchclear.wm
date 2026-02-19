@@ -1,0 +1,150 @@
+// vsignal bitset version with "touched word" clearing (avoid clearing all 128 words)
+
+fn malloc(size: i32): i32 {
+  let hp: i32 = load_i32(0);
+  let ptr: i32 = hp;
+  store_i32(0, hp + size);
+  return ptr;
+}
+
+fn node_ptr(g: i32, id: i32): i32 {
+  return g + (id << 8) + (id << 2);
+}
+
+fn word_idx(id: i32): i32 {
+  return id >> 5;
+}
+
+fn bit_mask(id: i32): i32 {
+  return 1 << (id & 31);
+}
+
+// Layout (relative to g):
+// nodes: 1,064,960 bytes
+// node_count:         1,064,960
+// update_buffer:      1,064,964 (4096 i32)
+// update_count:       1,081,348
+// visited_words:      1,081,352 (128 i32)
+// touched_mark:       1,081,864 (128 i32)
+// touched_list:       1,082,376 (128 i32)
+// touched_count:      1,082,888
+// queue:              1,082,892 (4096 i32)
+// total size:         1,099,276
+
+export fn init_graph(): i32 {
+  let g: i32 = malloc(1099276);
+  store_i32(g + 1064960, 0);
+  store_i32(g + 1081348, 0);
+  store_i32(g + 1082888, 0);
+  return g;
+}
+
+export fn create_node(g: i32): i32 {
+  let id: i32 = load_i32(g + 1064960);
+  store_i32(g + 1064960, id + 1);
+  return id;
+}
+
+export fn add_dependency(g: i32, dependent: i32, dependency: i32) {
+  let np: i32 = node_ptr(g, dependency);
+  let cnt: i32 = load_i32(np + 256);
+  if cnt > 0 {
+    let last: i32 = load_i32(np + (cnt - 1) * 4);
+    if last == dependent {
+      return;
+    }
+  }
+  store_i32(np + cnt * 4, dependent);
+  store_i32(np + 256, cnt + 1);
+}
+
+fn touch_word(g: i32, wi: i32) {
+  let mark_addr: i32 = g + 1081864 + (wi << 2);
+  if load_i32(mark_addr) == 0 {
+    store_i32(mark_addr, 1);
+    let tc_addr: i32 = g + 1082888;
+    let tc: i32 = load_i32(tc_addr);
+    store_i32(g + 1082376 + (tc << 2), wi);
+    store_i32(tc_addr, tc + 1);
+  }
+}
+
+fn visited_set(g: i32, visited_base: i32, id: i32) {
+  let wi: i32 = word_idx(id);
+  touch_word(g, wi);
+  let addr: i32 = visited_base + (wi << 2);
+  let word: i32 = load_i32(addr);
+  store_i32(addr, word | bit_mask(id));
+}
+
+fn visited_get(visited_base: i32, id: i32): i32 {
+  let wi: i32 = word_idx(id);
+  let word: i32 = load_i32(visited_base + (wi << 2));
+  return word & bit_mask(id);
+}
+
+fn clear_touched(g: i32, visited_base: i32) {
+  let tc_addr: i32 = g + 1082888;
+  let tc: i32 = load_i32(tc_addr);
+  let i: i32 = 0;
+  while i < tc {
+    let wi: i32 = load_i32(g + 1082376 + (i << 2));
+    store_i32(visited_base + (wi << 2), 0);
+    store_i32(g + 1081864 + (wi << 2), 0);
+    i = i + 1;
+  }
+  store_i32(tc_addr, 0);
+}
+
+export fn propagate(g: i32, source_id: i32): i32 {
+  let update_base: i32 = g + 1064964;
+  let visited_base: i32 = g + 1081352;
+  let queue_base: i32 = g + 1082892;
+
+  store_i32(g + 1081348, 0);
+  // Do not clear visited here; we clear only touched at end.
+
+  let q_head: i32 = 0;
+  let q_tail: i32 = 0;
+
+  let srcp: i32 = node_ptr(g, source_id);
+  let cnt: i32 = load_i32(srcp + 256);
+  let i: i32 = 0;
+  while i < cnt {
+    let dep: i32 = load_i32(srcp + (i << 2));
+    store_i32(queue_base + (q_tail << 2), dep);
+    q_tail = q_tail + 1;
+    visited_set(g, visited_base, dep);
+    i = i + 1;
+  }
+
+  while q_head < q_tail {
+    let curr: i32 = load_i32(queue_base + (q_head << 2));
+    q_head = q_head + 1;
+
+    let uc: i32 = load_i32(g + 1081348);
+    store_i32(update_base + (uc << 2), curr);
+    store_i32(g + 1081348, uc + 1);
+
+    let cp: i32 = node_ptr(g, curr);
+    let dcnt: i32 = load_i32(cp + 256);
+    let j: i32 = 0;
+    while j < dcnt {
+      let dep2: i32 = load_i32(cp + (j << 2));
+      if visited_get(visited_base, dep2) == 0 {
+        visited_set(g, visited_base, dep2);
+        store_i32(queue_base + (q_tail << 2), dep2);
+        q_tail = q_tail + 1;
+      }
+      j = j + 1;
+    }
+  }
+
+  let out: i32 = load_i32(g + 1081348);
+  clear_touched(g, visited_base);
+  return out;
+}
+
+export fn get_update_buffer_ptr(g: i32): i32 {
+  return g + 1064964;
+}
