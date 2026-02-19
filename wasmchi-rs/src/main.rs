@@ -17,6 +17,11 @@ struct Args {
     /// web exports main if no exports exist; wasi exports _start if no exports exist
     #[arg(long, default_value = "web")]
     target: String,
+
+    /// Export the auto-generated _start function (useful for embedders like vitrio).
+    /// Disable for slightly smaller binaries when you don't need _start.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    export_start: bool,
 }
 
 fn main() -> Result<()> {
@@ -33,7 +38,7 @@ fn main() -> Result<()> {
         other => bail!("unknown --target: {other}"),
     };
 
-    let bytes = wasmgen::compile(program, target).context("compile failed")?;
+    let bytes = wasmgen::compile(program, target, args.export_start).context("compile failed")?;
     std::fs::write(&args.out, bytes).with_context(|| format!("write out failed: {}", args.out))?;
 
     Ok(())

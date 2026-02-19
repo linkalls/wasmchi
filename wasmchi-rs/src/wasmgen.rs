@@ -48,11 +48,11 @@ fn ensure_start(prog: &mut Program) {
     if prog.fns.iter().any(|f| f.name == "_start") {
         return;
     }
-    // export _start by default
+    // auto-generated _start (not exported by default; export is controlled by compile option)
     prog.fns.insert(
         0,
         FnDecl {
-            exported: true,
+            exported: false,
             name: "_start".to_string(),
             params: vec![],
             ret: TypeName::Void,
@@ -68,7 +68,7 @@ fn ensure_start(prog: &mut Program) {
     );
 }
 
-pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
+pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<Vec<u8>> {
     ensure_start(&mut prog);
 
     // const fold map (order matters; resolve sequentially)
@@ -216,12 +216,19 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
         }
     }
 
-    // roots: exported fns + (if none, entry)
+    // roots: exported fns + optional _start + (if none, entry)
     let mut roots: Vec<String> = candidates
         .iter()
         .filter(|f| f.exported)
         .map(|f| f.name.clone())
         .collect();
+
+    if export_start {
+        if fn_map.contains_key("_start") {
+            roots.push("_start".to_string());
+        }
+    }
+
     if roots.is_empty() {
         roots.push(match target {
             Target::Web => "main".to_string(),
@@ -287,6 +294,16 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
         if f.exported {
             let idx = *func_index.get(&f.name).unwrap();
             exports.export(&f.name, ExportKind::Func, idx);
+        }
+    }
+
+    // optionally export auto-generated _start (or user-defined _start even if not marked export)
+    if export_start {
+        if let Some(idx) = func_index.get("_start").copied() {
+            // avoid duplicate export if user already exported it
+            if !emitted_fns.iter().any(|f| f.name == "_start" && f.exported) {
+                exports.export("_start", ExportKind::Func, idx);
+            }
         }
     }
 
