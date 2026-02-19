@@ -464,6 +464,26 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
             Ok(())
         }
 
+        fn expr_result_ty(
+            e: &Expr,
+            fn_rets: &std::collections::HashMap<String, TypeName>,
+        ) -> Result<TypeName> {
+            Ok(match e {
+                Expr::Num(_) | Expr::Var(_) | Expr::Bin { .. } => TypeName::I32,
+                Expr::Call { name, .. } => {
+                    if name == "store_i32" {
+                        TypeName::Void
+                    } else if name == "load_i32" {
+                        TypeName::I32
+                    } else {
+                        *fn_rets
+                            .get(name)
+                            .with_context(|| format!("unknown fn {name}"))?
+                    }
+                }
+            })
+        }
+
         fn emit_stmt(
             st: &Stmt,
             instrs: &mut Vec<Instruction>,
@@ -471,6 +491,7 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
             func_index: &std::collections::HashMap<String, u32>,
             inline_map: &std::collections::HashMap<String, (Vec<String>, Expr)>,
             inline_void: &std::collections::HashMap<String, (Vec<String>, Vec<Expr>)>,
+            fn_rets: &std::collections::HashMap<String, TypeName>,
             consts: &std::collections::HashMap<String, i32>,
             locals_types: &mut Vec<ValType>,
             next_local: &mut u32,
@@ -509,10 +530,7 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                     }
 
                     emit_expr(e, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
-                    // if the expr returns a value we should drop; currently only calls/loads used.
-                    // For safety, drop if it could leave value on stack: load_i32 and non-void calls.
-                    // We'll only drop on load_i32.
-                    if matches!(e, Expr::Call { name, .. } if name == "load_i32") {
+                    if expr_result_ty(e, fn_rets)? == TypeName::I32 {
                         instrs.push(Instruction::Drop);
                     }
                 }
@@ -530,12 +548,12 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                     emit_expr(cond, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
                     instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                     for s in then_body {
-                        emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, consts, locals_types, next_local)?;
+                        emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, fn_rets, consts, locals_types, next_local)?;
                     }
                     if !else_body.is_empty() {
                         instrs.push(Instruction::Else);
                         for s in else_body {
-                            emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, consts, locals_types, next_local)?;
+                            emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, fn_rets, consts, locals_types, next_local)?;
                         }
                     }
                     instrs.push(Instruction::End);
@@ -547,7 +565,7 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                     instrs.push(Instruction::I32Eqz);
                     instrs.push(Instruction::BrIf(1));
                     for s in body {
-                        emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, consts, locals_types, next_local)?;
+                        emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, fn_rets, consts, locals_types, next_local)?;
                     }
                     instrs.push(Instruction::Br(0));
                     instrs.push(Instruction::End);
@@ -555,6 +573,12 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                 }
             }
             Ok(())
+        }
+
+        // function return types (for drop insertion)
+        let mut fn_rets = std::collections::HashMap::<String, TypeName>::new();
+        for ff in &emitted_fns {
+            fn_rets.insert(ff.name.clone(), ff.ret);
         }
 
         // emit function body
@@ -566,6 +590,7 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                 &func_index,
                 &inline_map,
                 &inline_void,
+                &fn_rets,
                 &consts,
                 &mut locals_types,
                 &mut next_local,
