@@ -98,21 +98,43 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
         idx
     };
 
-    // inline-only helpers: non-exported i32 fn with single `return <expr>;`
+    // inline-only helpers:
+    // - i32 fn with single `return <expr>;`
+    // - void fn with only `expr; expr; ...` (no let/assign/if/while/return)
     let mut inline_map = std::collections::HashMap::<String, (Vec<String>, Expr)>::new();
+    let mut inline_void = std::collections::HashMap::<String, (Vec<String>, Vec<Expr>)>::new();
     for f in &prog.fns {
         if f.exported {
             continue;
         }
-        if f.ret != TypeName::I32 {
-            continue;
+
+        // i32 return-expr inline
+        if f.ret == TypeName::I32 && f.body.len() == 1 {
+            if let Stmt::Return(Some(expr)) = &f.body[0] {
+                let params = f.params.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+                inline_map.insert(f.name.clone(), (params, expr.clone()));
+                continue;
+            }
         }
-        if f.body.len() != 1 {
-            continue;
-        }
-        if let Stmt::Return(Some(expr)) = &f.body[0] {
-            let params = f.params.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
-            inline_map.insert(f.name.clone(), (params, expr.clone()));
+
+        // void expr-stmt inline
+        if f.ret == TypeName::Void {
+            let mut exprs = Vec::new();
+            let mut ok = true;
+            for st in &f.body {
+                match st {
+                    Stmt::Expr(e) => exprs.push(e.clone()),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && !exprs.is_empty() {
+                let params = f.params.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+                inline_void.insert(f.name.clone(), (params, exprs));
+                continue;
+            }
         }
     }
 
@@ -120,7 +142,7 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
     let emitted_fns: Vec<&FnDecl> = prog
         .fns
         .iter()
-        .filter(|f| f.exported || !inline_map.contains_key(&f.name))
+        .filter(|f| f.exported || (!inline_map.contains_key(&f.name) && !inline_void.contains_key(&f.name)))
         .collect();
 
     // function indices (imports not supported yet; funcs start at 0)
@@ -220,6 +242,7 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
             locals: &std::collections::HashMap<String, u32>,
             func_index: &std::collections::HashMap<String, u32>,
             inline_map: &std::collections::HashMap<String, (Vec<String>, Expr)>,
+            inline_void: &std::collections::HashMap<String, (Vec<String>, Vec<Expr>)>,
             consts: &std::collections::HashMap<String, i32>,
         ) -> Result<()> {
             match e {
@@ -236,8 +259,8 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                     }
                 }
                 Expr::Bin { op, l, r } => {
-                    emit_expr(l, instrs, locals, func_index, inline_map, consts)?;
-                    emit_expr(r, instrs, locals, func_index, inline_map, consts)?;
+                    emit_expr(l, instrs, locals, func_index, inline_map, inline_void, consts)?;
+                    emit_expr(r, instrs, locals, func_index, inline_map, inline_void, consts)?;
                     instrs.push(match op {
                         BinOp::Add => Instruction::I32Add,
                         BinOp::Sub => Instruction::I32Sub,
@@ -256,7 +279,7 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                     });
                 }
                 Expr::Call { name, args } => {
-                    // inline helper
+                    // inline helper (i32 return expr)
                     if let Some((params, body)) = inline_map.get(name) {
                         if params.len() != args.len() {
                             bail!("arity mismatch for {name}");
@@ -266,14 +289,16 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                             subst.insert(p.clone(), a.clone());
                         }
                         let inlined = subst_expr(body, &subst);
-                        return emit_expr(&inlined, instrs, locals, func_index, inline_map, consts);
+                        return emit_expr(&inlined, instrs, locals, func_index, inline_map, inline_void, consts);
                     }
+
+                    // NOTE: void inline is handled in statement position only
 
                     if name == "load_i32" {
                         if args.len() != 1 {
                             bail!("load_i32 expects 1 arg");
                         }
-                        emit_expr(&args[0], instrs, locals, func_index, inline_map, consts)?;
+                        emit_expr(&args[0], instrs, locals, func_index, inline_map, inline_void, consts)?;
                         instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -285,8 +310,8 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                         if args.len() != 2 {
                             bail!("store_i32 expects 2 args");
                         }
-                        emit_expr(&args[0], instrs, locals, func_index, inline_map, consts)?;
-                        emit_expr(&args[1], instrs, locals, func_index, inline_map, consts)?;
+                        emit_expr(&args[0], instrs, locals, func_index, inline_map, inline_void, consts)?;
+                        emit_expr(&args[1], instrs, locals, func_index, inline_map, inline_void, consts)?;
                         instrs.push(Instruction::I32Store(wasm_encoder::MemArg {
                             offset: 0,
                             align: 2,
@@ -297,7 +322,7 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
 
                     let idx = *func_index.get(name).with_context(|| format!("unknown fn {name}"))?;
                     for a in args {
-                        emit_expr(a, instrs, locals, func_index, inline_map, consts)?;
+                        emit_expr(a, instrs, locals, func_index, inline_map, inline_void, consts)?;
                     }
                     instrs.push(Instruction::Call(idx));
                 }
@@ -311,6 +336,7 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
             locals_map: &mut std::collections::HashMap<String, u32>,
             func_index: &std::collections::HashMap<String, u32>,
             inline_map: &std::collections::HashMap<String, (Vec<String>, Expr)>,
+            inline_void: &std::collections::HashMap<String, (Vec<String>, Vec<Expr>)>,
             consts: &std::collections::HashMap<String, i32>,
             locals_types: &mut Vec<ValType>,
             next_local: &mut u32,
@@ -321,16 +347,34 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                     *next_local += 1;
                     locals_types.push(ValType::I32);
                     locals_map.insert(name.clone(), idx);
-                    emit_expr(expr, instrs, locals_map, func_index, inline_map, consts)?;
+                    emit_expr(expr, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
                     instrs.push(Instruction::LocalSet(idx));
                 }
                 Stmt::Assign { name, expr } => {
                     let idx = *locals_map.get(name).with_context(|| format!("undef var {name}"))?;
-                    emit_expr(expr, instrs, locals_map, func_index, inline_map, consts)?;
+                    emit_expr(expr, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
                     instrs.push(Instruction::LocalSet(idx));
                 }
                 Stmt::Expr(e) => {
-                    emit_expr(e, instrs, locals_map, func_index, inline_map, consts)?;
+                    // inline void helper when called in statement position
+                    if let Expr::Call { name, args } = e {
+                        if let Some((params, body_exprs)) = inline_void.get(name) {
+                            if params.len() != args.len() {
+                                bail!("arity mismatch for {name}");
+                            }
+                            let mut subst = std::collections::HashMap::<String, Expr>::new();
+                            for (p, a) in params.iter().zip(args.iter()) {
+                                subst.insert(p.clone(), a.clone());
+                            }
+                            for ex in body_exprs {
+                                let inlined = subst_expr(ex, &subst);
+                                emit_expr(&inlined, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
+                            }
+                            return Ok(());
+                        }
+                    }
+
+                    emit_expr(e, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
                     // if the expr returns a value we should drop; currently only calls/loads used.
                     // For safety, drop if it could leave value on stack: load_i32 and non-void calls.
                     // We'll only drop on load_i32.
@@ -340,7 +384,7 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                 }
                 Stmt::Return(opt) => {
                     if let Some(e) = opt {
-                        emit_expr(e, instrs, locals_map, func_index, inline_map, consts)?;
+                        emit_expr(e, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
                     }
                     instrs.push(Instruction::Return);
                 }
@@ -349,15 +393,15 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                     then_body,
                     else_body,
                 } => {
-                    emit_expr(cond, instrs, locals_map, func_index, inline_map, consts)?;
+                    emit_expr(cond, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
                     instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
                     for s in then_body {
-                        emit_stmt(s, instrs, locals_map, func_index, inline_map, consts, locals_types, next_local)?;
+                        emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, consts, locals_types, next_local)?;
                     }
                     if !else_body.is_empty() {
                         instrs.push(Instruction::Else);
                         for s in else_body {
-                            emit_stmt(s, instrs, locals_map, func_index, inline_map, consts, locals_types, next_local)?;
+                            emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, consts, locals_types, next_local)?;
                         }
                     }
                     instrs.push(Instruction::End);
@@ -365,11 +409,11 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                 Stmt::While { cond, body } => {
                     instrs.push(Instruction::Block(wasm_encoder::BlockType::Empty));
                     instrs.push(Instruction::Loop(wasm_encoder::BlockType::Empty));
-                    emit_expr(cond, instrs, locals_map, func_index, inline_map, consts)?;
+                    emit_expr(cond, instrs, locals_map, func_index, inline_map, inline_void, consts)?;
                     instrs.push(Instruction::I32Eqz);
                     instrs.push(Instruction::BrIf(1));
                     for s in body {
-                        emit_stmt(s, instrs, locals_map, func_index, inline_map, consts, locals_types, next_local)?;
+                        emit_stmt(s, instrs, locals_map, func_index, inline_map, inline_void, consts, locals_types, next_local)?;
                     }
                     instrs.push(Instruction::Br(0));
                     instrs.push(Instruction::End);
@@ -387,6 +431,7 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
                 &mut locals_map,
                 &func_index,
                 &inline_map,
+                &inline_void,
                 &consts,
                 &mut locals_types,
                 &mut next_local,
