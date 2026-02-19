@@ -138,11 +138,121 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
         }
     }
 
-    // Emit all functions except inline-only helpers
-    let emitted_fns: Vec<&FnDecl> = prog
+    // Build function list: drop inline-only helpers, then do a simple reachability DCE.
+    let candidates: Vec<&FnDecl> = prog
         .fns
         .iter()
-        .filter(|f| f.exported || (!inline_map.contains_key(&f.name) && !inline_void.contains_key(&f.name)))
+        .filter(|f| !inline_map.contains_key(&f.name) && !inline_void.contains_key(&f.name))
+        .collect();
+
+    // name -> fn
+    let mut fn_map = std::collections::HashMap::<String, &FnDecl>::new();
+    for f in &candidates {
+        fn_map.insert(f.name.clone(), *f);
+    }
+
+    fn collect_calls_expr(
+        e: &Expr,
+        out: &mut std::collections::HashSet<String>,
+        inline_map: &std::collections::HashMap<String, (Vec<String>, Expr)>,
+        inline_void: &std::collections::HashMap<String, (Vec<String>, Vec<Expr>)>,
+    ) {
+        match e {
+            Expr::Num(_) | Expr::Var(_) => {}
+            Expr::Bin { l, r, .. } => {
+                collect_calls_expr(l, out, inline_map, inline_void);
+                collect_calls_expr(r, out, inline_map, inline_void);
+            }
+            Expr::Call { name, args } => {
+                for a in args {
+                    collect_calls_expr(a, out, inline_map, inline_void);
+                }
+                if name == "load_i32" || name == "store_i32" {
+                    return;
+                }
+                // if inline helper, include its body calls too
+                if let Some((_ps, body)) = inline_map.get(name) {
+                    collect_calls_expr(body, out, inline_map, inline_void);
+                    return;
+                }
+                if let Some((_ps, exprs)) = inline_void.get(name) {
+                    for ex in exprs {
+                        collect_calls_expr(ex, out, inline_map, inline_void);
+                    }
+                    return;
+                }
+                out.insert(name.clone());
+            }
+        }
+    }
+
+    fn collect_calls_stmt(
+        s: &Stmt,
+        out: &mut std::collections::HashSet<String>,
+        inline_map: &std::collections::HashMap<String, (Vec<String>, Expr)>,
+        inline_void: &std::collections::HashMap<String, (Vec<String>, Vec<Expr>)>,
+    ) {
+        match s {
+            Stmt::Let { expr, .. } => collect_calls_expr(expr, out, inline_map, inline_void),
+            Stmt::Assign { expr, .. } => collect_calls_expr(expr, out, inline_map, inline_void),
+            Stmt::Expr(e) => collect_calls_expr(e, out, inline_map, inline_void),
+            Stmt::Return(Some(e)) => collect_calls_expr(e, out, inline_map, inline_void),
+            Stmt::Return(None) => {}
+            Stmt::If { cond, then_body, else_body } => {
+                collect_calls_expr(cond, out, inline_map, inline_void);
+                for st in then_body {
+                    collect_calls_stmt(st, out, inline_map, inline_void);
+                }
+                for st in else_body {
+                    collect_calls_stmt(st, out, inline_map, inline_void);
+                }
+            }
+            Stmt::While { cond, body } => {
+                collect_calls_expr(cond, out, inline_map, inline_void);
+                for st in body {
+                    collect_calls_stmt(st, out, inline_map, inline_void);
+                }
+            }
+        }
+    }
+
+    // roots: exported fns + (if none, entry)
+    let mut roots: Vec<String> = candidates
+        .iter()
+        .filter(|f| f.exported)
+        .map(|f| f.name.clone())
+        .collect();
+    if roots.is_empty() {
+        roots.push(match target {
+            Target::Web => "main".to_string(),
+            Target::Wasi => "_start".to_string(),
+        });
+    }
+
+    let mut live = std::collections::HashSet::<String>::new();
+    let mut work = std::collections::VecDeque::<String>::new();
+    for r in roots {
+        if live.insert(r.clone()) {
+            work.push_back(r);
+        }
+    }
+
+    while let Some(name) = work.pop_front() {
+        let Some(f) = fn_map.get(&name).copied() else { continue; };
+        let mut calls = std::collections::HashSet::<String>::new();
+        for st in &f.body {
+            collect_calls_stmt(st, &mut calls, &inline_map, &inline_void);
+        }
+        for callee in calls {
+            if live.insert(callee.clone()) {
+                work.push_back(callee);
+            }
+        }
+    }
+
+    let emitted_fns: Vec<&FnDecl> = candidates
+        .into_iter()
+        .filter(|f| f.exported || live.contains(&f.name))
         .collect();
 
     // function indices (imports not supported yet; funcs start at 0)
@@ -440,12 +550,30 @@ pub fn compile(mut prog: Program, target: Target) -> Result<Vec<u8>> {
 
         instrs.push(Instruction::End);
 
+        // peephole: local.set x; local.get x  => local.tee x
+        // (safe because it preserves the stack value while writing the local)
+        let mut p: Vec<Instruction> = Vec::with_capacity(instrs.len());
+        let mut i = 0usize;
+        while i < instrs.len() {
+            if i + 1 < instrs.len() {
+                if let (Instruction::LocalSet(a), Instruction::LocalGet(b)) = (&instrs[i], &instrs[i + 1]) {
+                    if a == b {
+                        p.push(Instruction::LocalTee(*a));
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            p.push(instrs[i].clone());
+            i += 1;
+        }
+
         // locals grouping: one group of i32 locals
         let local_count = locals_types.len() as u32;
         if local_count > 0 {
             func = Function::new(vec![(local_count, ValType::I32)]);
         }
-        for ins in instrs {
+        for ins in p {
             func.instruction(&ins);
         }
 
