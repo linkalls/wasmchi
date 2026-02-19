@@ -595,6 +595,36 @@ pub fn compile(mut prog: Program, target: Target, export_start: bool) -> Result<
                     i += 2;
                     continue;
                 }
+
+                // algebraic identities (when constant is the RHS):
+                //   x + 0 => x
+                //   x | 0 => x
+                //   x ^ 0 => x
+                //   x * 1 => x
+                //   x & -1 => x
+                //   x << 0 => x
+                //   x >> 0 => x
+                match (&instrs[i], &instrs[i + 1]) {
+                    (Instruction::I32Const(0), Instruction::I32Add)
+                    | (Instruction::I32Const(0), Instruction::I32Or)
+                    | (Instruction::I32Const(0), Instruction::I32Xor)
+                    | (Instruction::I32Const(0), Instruction::I32Shl)
+                    | (Instruction::I32Const(0), Instruction::I32ShrU)
+                    | (Instruction::I32Const(0), Instruction::I32ShrS) => {
+                        // drop const+op
+                        i += 2;
+                        continue;
+                    }
+                    (Instruction::I32Const(1), Instruction::I32Mul) => {
+                        i += 2;
+                        continue;
+                    }
+                    (Instruction::I32Const(-1), Instruction::I32And) => {
+                        i += 2;
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             p.push(instrs[i].clone());
             i += 1;
