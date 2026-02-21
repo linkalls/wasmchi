@@ -36,3 +36,4 @@ export default {
 - Typecheck imports/exports
 - (partial) string args for imports: `string` lowers to `(i32 ptr, i32 len)` (currently literal-only)
 - Next: string returns, non-literal strings, and safe allocation strategy
+- Node host: `--host` のJS関数は、wasmchiが `string` import を検出した場合 **自動で ptr/len → JS string にデコードして渡す**（つまり host 側は `js_log(msg)` でOK）
