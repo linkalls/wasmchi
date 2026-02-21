@@ -16,12 +16,14 @@ fn import_meta_from_source(src: &str) -> String {
                 .iter()
                 .map(|p| match p.ty {
                     wasmchi::Type::I32 => "i32",
+                    wasmchi::Type::F64 => "f64",
                     wasmchi::Type::String => "string",
                     wasmchi::Type::Void => "void",
                 })
                 .collect();
             let ret: &'static str = match im.ret_ty {
                 wasmchi::Type::I32 => "i32",
+                wasmchi::Type::F64 => "f64",
                 wasmchi::Type::String => "string",
                 wasmchi::Type::Void => "void",
             };
@@ -462,7 +464,10 @@ function wrapUserEnv(userEnv) {{
       let i = 0;
       for (const t of spec.params) {{
         if (t === 'i32') {{
-          args.push(loweredArgs[i]);
+          args.push(loweredArgs[i] | 0);
+          i += 1;
+        }} else if (t === 'f64') {{
+          args.push(+loweredArgs[i]);
           i += 1;
         }} else if (t === 'string') {{
           const ptr = loweredArgs[i];
@@ -481,6 +486,9 @@ function wrapUserEnv(userEnv) {{
       }}
       if (spec.ret === 'i32') {{
         return ret | 0;
+      }}
+      if (spec.ret === 'f64') {{
+        return +ret;
       }}
       if (spec.ret === 'string') {{
         const s = String(ret ?? "");

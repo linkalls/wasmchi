@@ -24,7 +24,7 @@ and the source contains `import { ... } from "npm:<pkg>"`, the runner will:
 1) Ensure a local npm project exists in the `.wm` directory (`package.json`)
 2) Run **`bun install`** (preferred) to materialize `node_modules`
 3) Read the package `.d.ts` (heuristic: `node_modules/<pkg>/index.d.ts`)
-4) Infer a tiny FFI signature subset (currently: `string | number | void`)
+4) Infer a tiny FFI signature subset (currently: `string | number | void`, where `number` => `f64`)
 5) Rewrite the source by prepending `import fn ...` declarations
 6) Generate a temporary host module that imports from npm and exposes functions via `env.*`
 

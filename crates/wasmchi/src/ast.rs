@@ -34,6 +34,7 @@ pub struct Param {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     I32,
+    F64,
     String,
     Void,
 }

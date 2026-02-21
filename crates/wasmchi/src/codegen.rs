@@ -43,13 +43,14 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         return Err(CodegenError::UnsupportedType);
     }
 
-    // v0: user functions are i32-only for now. imports: allow i32 + string params and i32/void/string returns.
+    // v0: user functions are i32-only for now.
+    // imports: allow i32/f64 + string params and i32/f64/void/string returns.
     for imp in &imports {
-        if !matches!(imp.ret_ty, Type::I32 | Type::Void | Type::String) {
+        if !matches!(imp.ret_ty, Type::I32 | Type::F64 | Type::Void | Type::String) {
             return Err(CodegenError::UnsupportedType);
         }
         for p in &imp.params {
-            if !matches!(p.ty, Type::I32 | Type::String) {
+            if !matches!(p.ty, Type::I32 | Type::F64 | Type::String) {
                 return Err(CodegenError::UnsupportedType);
             }
         }
@@ -82,6 +83,7 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         for p in &imp.params {
             match p.ty {
                 Type::I32 => lowered_params.push(ValType::I32),
+                Type::F64 => lowered_params.push(ValType::F64),
                 Type::String => {
                     lowered_params.push(ValType::I32);
                     lowered_params.push(ValType::I32);
@@ -91,6 +93,7 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         }
         let results: Vec<ValType> = match imp.ret_ty {
             Type::I32 => vec![ValType::I32],
+            Type::F64 => vec![ValType::F64],
             Type::Void => vec![],
             Type::String => vec![ValType::I32, ValType::I32],
         };
@@ -355,6 +358,16 @@ fn emit_expr(
                     match ty {
                         Type::I32 => {
                             emit_expr(f, arg, locals, fn_indices, import_sigs, data, next_data_offset)?;
+                        }
+                        Type::F64 => {
+                            // v0: allow int literal -> f64 conversion for JS number interop.
+                            match arg {
+                                Expr::Int(n) => {
+                                    f.instruction(&Instruction::I32Const(*n));
+                                    f.instruction(&Instruction::F64ConvertI32S);
+                                }
+                                _ => return Err(CodegenError::UnsupportedType),
+                            }
                         }
                         Type::String => {
                             let Expr::Str(s) = arg else {

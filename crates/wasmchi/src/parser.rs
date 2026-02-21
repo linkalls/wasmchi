@@ -102,6 +102,10 @@ impl Parser {
                 self.i += 1;
                 Ok(Type::I32)
             }
+            lexer::TokenKind::Ident(s) if s == "f64" => {
+                self.i += 1;
+                Ok(Type::F64)
+            }
             lexer::TokenKind::Ident(s) if s == "string" => {
                 self.i += 1;
                 Ok(Type::String)

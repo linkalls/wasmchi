@@ -146,7 +146,7 @@ fn infer_params_with_optional(params_slice: &str) -> Option<(Vec<&'static str>, 
         let ty_tok = take_ident(ty);
         let mapped = match ty_tok {
             "string" => "string",
-            "number" => "i32",
+            "number" => "f64",
             _ => return None,
         };
 
@@ -174,7 +174,7 @@ fn take_ident(s: &str) -> &str {
 fn map_ret_token(tok: &str, decl_slice: &str, close_paren: Option<usize>) -> Option<&'static str> {
     match tok {
         "string" => Some("string"),
-        "number" => Some("i32"),
+        "number" => Some("f64"),
         "void" => Some("void"),
         other => {
             // Heuristic: `function nanoid<Type extends string>(...): Type`
@@ -210,6 +210,11 @@ export function foo(x: number): number
         let dts = r#"export function nanoid(size?: number): string"#;
         // optional param is not required
         assert_eq!(infer_fn_sig(dts, "nanoid"), Some((vec![], "string")));
+        // but the full signature includes the optional param
+        assert_eq!(
+            infer_fn_sig_with_optional(dts, "nanoid"),
+            Some((vec![], vec!["f64"], "string"))
+        );
     }
 
     #[test]

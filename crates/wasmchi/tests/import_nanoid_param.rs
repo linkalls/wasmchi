@@ -5,7 +5,7 @@ fn auto_host_infers_optional_number_param_and_string_return() {
     // This is a synthetic test using explicit import fn (not npm auto).
     // It ensures the core lowering works: nanoid(i32)->string.
     let src = r#"
-import fn nanoid(size: i32): string
+import fn nanoid(size: f64): string
 
 export fn main(): i32 {
   print(nanoid(10))
@@ -25,7 +25,7 @@ export fn main(): i32 {
     let host_path = dir.join("host.mjs");
     fs::write(
         &host_path,
-        "export default { nanoid: (size) => 'x'.repeat(size) }\n",
+        "export default { nanoid: (size) => 'x'.repeat(size|0) }\n",
     )
     .unwrap();
 

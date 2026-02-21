@@ -57,11 +57,12 @@ export fn main(): i32 {
 
 ## 4. Types (v0)
 - `i32`
+- `f64`（JSの `number` と相性がいい。v0は主にimportで使う）
 - `void`（import用に導入。ユーザー定義fnの戻り値は今はi32のみ）
-- `string`（現状: print/importでリテラルのみ）
+- `string`（現状: print/importでリテラル中心）
 
 拡張予定:
-- `bool, i64, f32, f64`
+- `bool, i64, f32`
 
 ## 5. Execution targets
 - `wasmchi run --target node <file>`: Nodeホスト生成して実行

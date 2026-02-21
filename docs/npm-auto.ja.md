@@ -23,7 +23,7 @@ wasmchi-cli run --target node main.wm
 1) `.wm` ファイルのディレクトリにローカルnpmプロジェクトを用意（`package.json`）
 2) **`bun install`** を実行（bun優先）して `node_modules` を作る
 3) パッケージの `.d.ts` を読む（ヒューリスティック: `node_modules/<pkg>/index.d.ts`）
-4) 使える範囲だけFFIシグネチャを推論（現状: `string | number | void`）
+4) 使える範囲だけFFIシグネチャを推論（現状: `string | number | void`。`number` は `f64` に落とす）
 5) ソースを書き換えて、先頭に `import fn ...` を自動生成して足す
 6) 一時的なhostモジュールを生成して、npmからimportした関数を `env.*` としてWasmに渡す
 
