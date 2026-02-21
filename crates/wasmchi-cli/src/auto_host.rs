@@ -37,21 +37,27 @@ pub fn parse_npm_imports(src: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
-/// Extract a return type for an exported function-like symbol from a .d.ts file.
+/// Infer an exported function signature from a .d.ts file.
 ///
-/// v0 supports only: string|number|void (number => i32).
+/// v0 supports only a small type surface:
+/// - params: string | number | void (void never used as param)
+/// - returns: string | number | void
+/// where number => i32.
 ///
 /// Supported patterns:
 /// - `export function name(...): Ret`
 /// - `export const name: (... ) => Ret`
-pub fn infer_fn_ret_type(dts: &str, name: &str) -> Option<&'static str> {
+///
+/// Overloads:
+/// - we pick the *first* overload that we can fully lower.
+pub fn infer_fn_sig(dts: &str, name: &str) -> Option<(Vec<&'static str>, &'static str)> {
     // 1) Try `export function` (support overloads by scanning all occurrences)
     let needle = format!("export function {name}");
     let mut search_from = 0;
     while let Some(pos) = dts[search_from..].find(&needle) {
         let pos = search_from + pos;
-        if let Some(ret) = infer_ret_from_export_function_at(dts, pos + needle.len()) {
-            return Some(ret);
+        if let Some(sig) = infer_sig_from_export_function_at(dts, pos + needle.len()) {
+            return Some(sig);
         }
         search_from = pos + needle.len();
     }
@@ -63,23 +69,73 @@ pub fn infer_fn_ret_type(dts: &str, name: &str) -> Option<&'static str> {
         // find `=>`
         let arrow = after.find("=>")?;
         let after_arrow = after[arrow + 2..].trim_start();
-        let tok = take_ident(after_arrow);
-        return map_ret_token(tok, after, None);
+        let ret_tok = take_ident(after_arrow);
+        let ret = map_ret_token(ret_tok, after, None)?;
+
+        // params: find first '(' after ':' and the matching ')'
+        let open = after.find('(')?;
+        let close = after[open + 1..].find(')')? + open + 1;
+        let params_slice = &after[open + 1..close];
+        let params = infer_params(params_slice)?;
+
+        return Some((params, ret));
     }
 
     None
 }
 
-fn infer_ret_from_export_function_at(dts: &str, start: usize) -> Option<&'static str> {
+/// Back-compat helper for older call sites.
+pub fn infer_fn_ret_type(dts: &str, name: &str) -> Option<&'static str> {
+    infer_fn_sig(dts, name).map(|(_, r)| r)
+}
+
+fn infer_sig_from_export_function_at(dts: &str, start: usize) -> Option<(Vec<&'static str>, &'static str)> {
     let after = &dts[start..];
 
-    // find `)` which ends the param list
+    // params are inside (...)
+    let open_paren = after.find('(')?;
     let close_paren = after.find(")")?;
+    if close_paren < open_paren {
+        return None;
+    }
+    let params_slice = &after[open_paren + 1..close_paren];
+    let params = infer_params(params_slice)?;
+
+    // return after `):`
     let after_paren = after[close_paren + 1..].trim_start();
     let after_colon = after_paren.strip_prefix(":")?.trim_start();
+    let ret_tok = take_ident(after_colon);
+    let ret = map_ret_token(ret_tok, after, Some(close_paren))?;
 
-    let tok = take_ident(after_colon);
-    map_ret_token(tok, after, Some(close_paren))
+    Some((params, ret))
+}
+
+fn infer_params(params_slice: &str) -> Option<Vec<&'static str>> {
+    let s = params_slice.trim();
+    if s.is_empty() {
+        return Some(vec![]);
+    }
+
+    let mut out = Vec::new();
+    // naive split by ',' (good enough for simple d.ts)
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // param: `name?: number` or `name: string`
+        let colon = part.find(':')?;
+        let ty = part[colon + 1..].trim();
+        let ty_tok = take_ident(ty);
+        let mapped = match ty_tok {
+            "string" => "string",
+            "number" => "i32",
+            _ => return None,
+        };
+        out.push(mapped);
+    }
+
+    Some(out)
 }
 
 fn take_ident(s: &str) -> &str {
@@ -125,13 +181,19 @@ mod tests {
 export function foo(): string
 export function foo(x: number): number
 "#;
-        assert_eq!(infer_fn_ret_type(dts, "foo"), Some("string"));
+        assert_eq!(infer_fn_sig(dts, "foo"), Some((vec![], "string")));
+    }
+
+    #[test]
+    fn infer_export_function_params_optional_number() {
+        let dts = r#"export function nanoid(size?: number): string"#;
+        assert_eq!(infer_fn_sig(dts, "nanoid"), Some((vec!["i32"], "string")));
     }
 
     #[test]
     fn infer_export_const_fn() {
         let dts = r#"export const bar: (x: string) => void"#;
-        assert_eq!(infer_fn_ret_type(dts, "bar"), Some("void"));
+        assert_eq!(infer_fn_sig(dts, "bar"), Some((vec!["string"], "void")));
     }
 }
 

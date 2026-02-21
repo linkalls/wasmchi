@@ -62,8 +62,19 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
     for (pkg, names) in &imports {
         if let Some(dts) = auto_host::read_pkg_dts(project_dir, pkg) {
             for name in names {
-                let ret = auto_host::infer_fn_ret_type(&dts, name).unwrap_or("i32");
-                import_fns.push(format!("import fn {name}(): {ret}"));
+                if let Some((params, ret)) = auto_host::infer_fn_sig(&dts, name) {
+                    let p = params
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, ty)| format!("a{i}: {ty}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    import_fns.push(format!("import fn {name}({p}): {ret}"));
+                } else {
+                    // fallback
+                    let ret = auto_host::infer_fn_ret_type(&dts, name).unwrap_or("i32");
+                    import_fns.push(format!("import fn {name}(): {ret}"));
+                }
             }
         } else {
             for name in names {
