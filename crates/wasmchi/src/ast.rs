@@ -35,6 +35,7 @@ pub struct Param {
 pub enum Type {
     I32,
     String,
+    Void,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

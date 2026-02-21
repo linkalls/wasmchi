@@ -43,13 +43,13 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         return Err(CodegenError::UnsupportedType);
     }
 
-    // v0: only i32 params/returns for user functions and imports (except print).
+    // v0: user functions are i32-only for now. imports: allow i32 + string params and i32/void returns.
     for imp in &imports {
-        if imp.ret_ty != Type::I32 {
+        if !matches!(imp.ret_ty, Type::I32 | Type::Void) {
             return Err(CodegenError::UnsupportedType);
         }
         for p in &imp.params {
-            if p.ty != Type::I32 {
+            if !matches!(p.ty, Type::I32 | Type::String) {
                 return Err(CodegenError::UnsupportedType);
             }
         }
@@ -77,8 +77,24 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     let mut import_type_indices: Vec<u32> = Vec::new();
     for imp in &imports {
         let idx = types.len();
-        let params = std::iter::repeat(ValType::I32).take(imp.params.len());
-        types.ty().function(params, [ValType::I32]);
+        // string params lower to (i32,i32)
+        let mut lowered_params: Vec<ValType> = Vec::new();
+        for p in &imp.params {
+            match p.ty {
+                Type::I32 => lowered_params.push(ValType::I32),
+                Type::String => {
+                    lowered_params.push(ValType::I32);
+                    lowered_params.push(ValType::I32);
+                }
+                _ => return Err(CodegenError::UnsupportedType),
+            }
+        }
+        let results: Vec<ValType> = match imp.ret_ty {
+            Type::I32 => vec![ValType::I32],
+            Type::Void => vec![],
+            _ => return Err(CodegenError::UnsupportedType),
+        };
+        types.ty().function(lowered_params, results);
         import_type_indices.push(idx);
     }
 
@@ -136,9 +152,15 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
 
     // name -> func index
     let mut fn_indices = std::collections::HashMap::<String, u32>::new();
+    // name -> signature (for imports, needed to lower args)
+    let mut import_sigs = std::collections::HashMap::<String, Vec<Type>>::new();
+    let mut import_rets = std::collections::HashMap::<String, Type>::new();
+
     // imported functions
     for (i, imp) in imports.iter().enumerate() {
         fn_indices.insert(imp.name.clone(), 1 + i as u32);
+        import_sigs.insert(imp.name.clone(), imp.params.iter().map(|p| p.ty.clone()).collect());
+        import_rets.insert(imp.name.clone(), imp.ret_ty.clone());
     }
     // defined functions
     let defined_base = 1 + imports.len() as u32;
@@ -173,7 +195,7 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
                     let local_idx = next_local;
                     next_local += 1;
                     locals.insert(name.clone(), local_idx);
-                    emit_expr(&mut f, expr, &locals, &fn_indices)?;
+                    emit_expr(&mut f, expr, &locals, &fn_indices, &import_sigs, &mut data, &mut next_data_offset)?;
                     f.instruction(&Instruction::LocalSet(local_idx));
                 }
                 Stmt::Print(expr) => {
@@ -193,13 +215,37 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
                     f.instruction(&Instruction::Call(0));
                 }
                 Stmt::Return(expr) => {
-                    emit_expr(&mut f, expr, &locals, &fn_indices)?;
+                    emit_expr(&mut f, expr, &locals, &fn_indices, &import_sigs, &mut data, &mut next_data_offset)?;
                     f.instruction(&Instruction::End);
                     did_return = true;
                     break;
                 }
                 Stmt::Expr(expr) => {
-                    emit_expr(&mut f, expr, &locals, &fn_indices)?;
+                    // If this is a void-returning import call, don't drop.
+                    if let Expr::Call { callee, .. } = expr {
+                        if let Some(Type::Void) = import_rets.get(callee) {
+                            emit_expr(
+                                &mut f,
+                                expr,
+                                &locals,
+                                &fn_indices,
+                                &import_sigs,
+                                &mut data,
+                                &mut next_data_offset,
+                            )?;
+                            continue;
+                        }
+                    }
+
+                    emit_expr(
+                        &mut f,
+                        expr,
+                        &locals,
+                        &fn_indices,
+                        &import_sigs,
+                        &mut data,
+                        &mut next_data_offset,
+                    )?;
                     f.instruction(&Instruction::Drop);
                 }
             }
@@ -222,6 +268,9 @@ fn emit_expr(
     expr: &Expr,
     locals: &std::collections::HashMap<String, u32>,
     fn_indices: &std::collections::HashMap<String, u32>,
+    import_sigs: &std::collections::HashMap<String, Vec<Type>>,
+    data: &mut DataSection,
+    next_data_offset: &mut u32,
 ) -> Result<(), CodegenError> {
     match expr {
         Expr::Int(n) => {
@@ -240,15 +289,46 @@ fn emit_expr(
             let Some(idx) = fn_indices.get(callee) else {
                 return Err(CodegenError::UnknownVariable(callee.clone()));
             };
-            for a in args {
-                emit_expr(f, a, locals, fn_indices)?;
+
+            // Lower args for imports: string => (ptr,len)
+            if let Some(sig) = import_sigs.get(callee) {
+                if sig.len() != args.len() {
+                    return Err(CodegenError::UnsupportedType);
+                }
+                for (arg, ty) in args.iter().zip(sig.iter()) {
+                    match ty {
+                        Type::I32 => {
+                            emit_expr(f, arg, locals, fn_indices, import_sigs, data, next_data_offset)?;
+                        }
+                        Type::String => {
+                            let Expr::Str(s) = arg else {
+                                return Err(CodegenError::UnsupportedType);
+                            };
+                            let bytes = s.as_bytes();
+                            let ptr = *next_data_offset;
+                            let len = bytes.len() as u32;
+                            *next_data_offset = next_data_offset.saturating_add(len);
+                            let offset = ConstExpr::i32_const(ptr as i32);
+                            data.active(0, &offset, bytes.iter().copied());
+                            f.instruction(&Instruction::I32Const(ptr as i32));
+                            f.instruction(&Instruction::I32Const(len as i32));
+                        }
+                        _ => return Err(CodegenError::UnsupportedType),
+                    }
+                }
+            } else {
+                // Defined functions: i32-only for now
+                for a in args {
+                    emit_expr(f, a, locals, fn_indices, import_sigs, data, next_data_offset)?;
+                }
             }
+
             f.instruction(&Instruction::Call(*idx));
             Ok(())
         }
         Expr::Binary { op, left, right } => {
-            emit_expr(f, left, locals, fn_indices)?;
-            emit_expr(f, right, locals, fn_indices)?;
+            emit_expr(f, left, locals, fn_indices, import_sigs, data, next_data_offset)?;
+            emit_expr(f, right, locals, fn_indices, import_sigs, data, next_data_offset)?;
             match op {
                 BinOp::Add => f.instruction(&Instruction::I32Add),
                 BinOp::Sub => f.instruction(&Instruction::I32Sub),

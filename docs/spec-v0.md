@@ -19,6 +19,7 @@
   - `import fn <name>(<params>): <type>`
   - `import fn <name>(<params>) <type>`
   - module名は v0 では固定で `env`（Node/Browserホスト側の `env.<name>` に繋がる）
+  - ABI (v0): `string` は wasm import 上は `(i32 ptr, i32 len)` にlowering
 - Function:
   - TS風: `fn <name>(<params>): <type> { <stmts> }`
   - V風:  `fn <name>(<params>) <type> { <stmts> }`
@@ -53,10 +54,12 @@ export fn main(): i32 {
 - 優先順位: `* /` > `+ -`
 
 ## 4. Types (v0)
-- `i32`（最初のコア）
+- `i32`
+- `void`（import用に導入。ユーザー定義fnの戻り値は今はi32のみ）
+- `string`（現状: print/importでリテラルのみ）
 
 拡張予定:
-- `bool, i64, f32, f64, void, string`
+- `bool, i64, f32, f64`
 
 ## 5. Execution targets
 - `wasmchi run --target node <file>`: Nodeホスト生成して実行

@@ -106,6 +106,10 @@ impl Parser {
                 self.i += 1;
                 Ok(Type::String)
             }
+            lexer::TokenKind::Ident(s) if s == "void" => {
+                self.i += 1;
+                Ok(Type::Void)
+            }
             _ => Err(self.err("expected type")),
         }
     }

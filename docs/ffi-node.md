@@ -34,4 +34,5 @@ export default {
 ## Next steps
 - (done) Add `import fn ...` syntax in wasmchi source (v0: module is fixed to `env`)
 - Typecheck imports/exports
-- Support string arguments/returns via `(ptr,len)` ABI (UTF-8)
+- (partial) string args for imports: `string` lowers to `(i32 ptr, i32 len)` (currently literal-only)
+- Next: string returns, non-literal strings, and safe allocation strategy
