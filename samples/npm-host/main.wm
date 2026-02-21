@@ -1,6 +1,6 @@
-import fn js_log_id(prefix: string): void
+import fn nanoid(): string
 
 export fn main(): i32 {
-  js_log_id("id=")
+  print(nanoid())
   return 0
 }

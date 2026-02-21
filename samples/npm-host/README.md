@@ -3,7 +3,7 @@
 This sample shows how to call a **regular npm package** function from wasmchi via the Node host.
 
 ## Files
-- `main.wm`: wasmchi program (imports `nanoid()` and logs it)
+- `main.wm`: wasmchi program (imports `nanoid()` and prints it)
 - `host.mjs`: Node host module that imports `nanoid` from npm and exposes it to wasm as `env.nanoid`
 - `package.json`: local npm project for the sample
 
@@ -21,5 +21,5 @@ cargo build -p wasmchi-cli
 ```
 
 Expected output:
-- A line like: `id=<random>`
+- A random id (from `nanoid()`)
 - Then the return value `0`
