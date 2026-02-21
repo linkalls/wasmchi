@@ -19,14 +19,16 @@ wasmchi run --target node <file.wm> --host host.mjs
 
 ### host.mjs example
 ```js
-import { ulid } from 'ulid'
+import { nanoid } from 'nanoid'
 
 export default {
-  // numeric only for now (wasmchi v0 has i32)
-  now_i32: () => (Date.now() | 0),
-  ulid_len: () => ulid().length | 0,
+  js_log_id: (prefix) => {
+    console.log(prefix + nanoid())
+  },
 }
 ```
+
+See also: `samples/npm-host/`.
 
 > npm resolution: `node` is executed with `cwd` set to the directory of `<file.wm>`.
 > Put your `package.json` + `node_modules` there (or run from a project dir).

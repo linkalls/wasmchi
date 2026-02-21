@@ -1,0 +1,6 @@
+import fn js_log_id(prefix: string): void
+
+export fn main(): i32 {
+  js_log_id("id=")
+  return 0
+}
