@@ -53,6 +53,22 @@ cargo build -p wasmchi-cli
 ./target/debug/wasmchi-cli run --target node <file.wm>
 ```
 
+### Run (Node, npm auto imports — no host.mjs)
+
+```wasmchi
+import { nanoid } from "npm:nanoid"
+
+export fn main(): i32 {
+  print(nanoid(10))
+  return 0
+}
+```
+
+```bash
+./target/debug/wasmchi-cli run --target node <file.wm>
+# runner will: create/update package.json + bun install + auto-host
+```
+
 ### Bundle (Browser)
 
 ```bash
@@ -79,6 +95,8 @@ See `docs/` for the living spec + roadmap:
 - `docs/spec-v0.md`
 - `docs/roadmap.md`
 - `docs/testing.md`
+- `docs/ffi-node.md`
+- `docs/npm-auto.md`
 
 ## License
 

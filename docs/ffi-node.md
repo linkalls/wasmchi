@@ -6,6 +6,8 @@ Use npm packages from the **Node host** and expose selected functions to wasmchi
 This keeps the wasm module pure/minimal, while letting you reuse the entire JS ecosystem.
 
 ## Current state (implemented)
+
+### Manual host
 `wasmchi-cli run --target node` supports an optional `--host <path>`.
 
 - The host module is loaded with dynamic `import()`.
@@ -29,6 +31,18 @@ export default {
 ```
 
 See also: `samples/npm-host/`.
+
+### Auto host (no host.mjs)
+If your source contains TS-like npm imports:
+
+```wasmchi
+import { nanoid } from "npm:nanoid"
+```
+
+then `wasmchi-cli run --target node <file.wm>` can auto-generate a host module and install deps (bun preferred).
+
+See: `samples/npm-auto/` and `docs/npm-auto.md`.
+
 
 > npm resolution: `node` is executed with `cwd` set to the directory of `<file.wm>`.
 > Put your `package.json` + `node_modules` there (or run from a project dir).
