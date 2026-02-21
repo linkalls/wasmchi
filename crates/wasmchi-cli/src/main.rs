@@ -5,7 +5,7 @@ fn import_meta_from_source(src: &str) -> String {
         return "[]".to_string();
     };
 
-    // JSON array: [{ name: "js_log", params: ["string","i32"] }]
+    // JSON array: [{ name: "js_log", params: ["string","i32"], ret: "void" }]
     let mut items: Vec<String> = Vec::new();
     for item in program.items {
         if let wasmchi::Item::ImportFn(im) = item {
@@ -18,11 +18,16 @@ fn import_meta_from_source(src: &str) -> String {
                     wasmchi::Type::Void => "void",
                 })
                 .collect();
-            // v0: ignore return type in meta for now
+            let ret: &'static str = match im.ret_ty {
+                wasmchi::Type::I32 => "i32",
+                wasmchi::Type::String => "string",
+                wasmchi::Type::Void => "void",
+            };
             items.push(format!(
-                "{{\"name\":{},\"params\":[{}]}}",
+                "{{\"name\":{},\"params\":[{}],\"ret\":{}}}",
                 json_str(&im.name),
-                params.into_iter().map(json_str).collect::<Vec<_>>().join(",")
+                params.into_iter().map(json_str).collect::<Vec<_>>().join(","),
+                json_str(ret)
             ));
         }
     }
@@ -267,6 +272,11 @@ const wasmBytes = await fs.readFile(wasmPath);
 
 let bytes;
 let decoder;
+const encoder = new TextEncoder();
+let allocFn;
+function alloc(len) {{
+  return (allocFn(len) | 0);
+}}
 function readString(ptr, len) {{
   return decoder.decode(bytes.subarray(ptr, ptr + len));
 }}
@@ -299,8 +309,24 @@ function wrapUserEnv(userEnv) {{
           throw new Error('unsupported param type: ' + t);
         }}
       }}
+
       const ret = fn(...args);
-      return ret;
+
+      if (spec.ret === 'void') {{
+        return;
+      }}
+      if (spec.ret === 'i32') {{
+        return ret | 0;
+      }}
+      if (spec.ret === 'string') {{
+        const s = String(ret ?? "");
+        const utf8 = encoder.encode(s);
+        const ptr = alloc(utf8.length);
+        bytes.set(utf8, ptr);
+        return [ptr, utf8.length];
+      }}
+
+      throw new Error('unsupported return type: ' + spec.ret);
     }};
   }}
 
@@ -313,6 +339,7 @@ const {{ instance }} = await WebAssembly.instantiate(wasmBytes, {{ env }});
 const memory = instance.exports.memory;
 bytes = new Uint8Array(memory.buffer);
 decoder = new TextDecoder('utf-8');
+allocFn = instance.exports.__alloc;
 
 const ret = instance.exports.main();
 console.log(ret);

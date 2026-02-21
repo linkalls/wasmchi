@@ -2,8 +2,8 @@ use thiserror::Error;
 
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function as WasmFunction,
-    FunctionSection, ImportSection, Instruction, MemorySection, MemoryType, Module, TypeSection,
-    ValType,
+    FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction, MemorySection,
+    MemoryType, Module, TypeSection, ValType,
 };
 
 use crate::ast::{BinOp, Expr, ImportFn, Item, Program, Stmt, Type};
@@ -13,7 +13,7 @@ use crate::ast::Function as AstFunction;
 pub enum CodegenError {
     #[error("missing export fn main")]
     MissingMain,
-    #[error("only i32 return type supported in v0")]
+    #[error("unsupported type or feature in v0")]
     UnsupportedType,
     #[error("function body must end in return")]
     MissingReturn,
@@ -43,9 +43,9 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         return Err(CodegenError::UnsupportedType);
     }
 
-    // v0: user functions are i32-only for now. imports: allow i32 + string params and i32/void returns.
+    // v0: user functions are i32-only for now. imports: allow i32 + string params and i32/void/string returns.
     for imp in &imports {
-        if !matches!(imp.ret_ty, Type::I32 | Type::Void) {
+        if !matches!(imp.ret_ty, Type::I32 | Type::Void | Type::String) {
             return Err(CodegenError::UnsupportedType);
         }
         for p in &imp.params {
@@ -92,7 +92,7 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         let results: Vec<ValType> = match imp.ret_ty {
             Type::I32 => vec![ValType::I32],
             Type::Void => vec![],
-            _ => return Err(CodegenError::UnsupportedType),
+            Type::String => vec![ValType::I32, ValType::I32],
         };
         types.ty().function(lowered_params, results);
         import_type_indices.push(idx);
@@ -106,6 +106,11 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         types.ty().function(params, [ValType::I32]);
         fn_type_indices.push(idx);
     }
+
+    // type for allocator: __alloc(len:i32)->i32
+    let alloc_ty = types.len();
+    types.ty().function([ValType::I32], [ValType::I32]);
+
     module.section(&types);
 
     // imports
@@ -121,6 +126,9 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     for ty in &fn_type_indices {
         functions.function(*ty);
     }
+    // allocator function
+    functions.function(alloc_ty);
+
     module.section(&functions);
 
     // memory (1 page) + export
@@ -134,6 +142,19 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     });
     module.section(&memories);
 
+    // globals: heap pointer for __alloc
+    // v0: start at a fixed offset to avoid overlapping data segments
+    let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(4096),
+    );
+    module.section(&globals);
+
     // exports
     let mut exports = ExportSection::new();
     // function index space: imported print=0, then imported fns, then defined fns
@@ -143,6 +164,9 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
             exports.export(&f.name, ExportKind::Func, defined_base + i as u32);
         }
     }
+    // allocator export
+    exports.export("__alloc", ExportKind::Func, defined_base + fns.len() as u32);
+
     exports.export("memory", ExportKind::Memory, 0);
     module.section(&exports);
 
@@ -199,20 +223,39 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
                     f.instruction(&Instruction::LocalSet(local_idx));
                 }
                 Stmt::Print(expr) => {
-                    let Expr::Str(s) = expr else {
-                        return Err(CodegenError::PrintNonLiteral);
-                    };
-                    let bytes = s.as_bytes();
-                    let ptr = next_data_offset;
-                    let len = bytes.len() as u32;
-                    next_data_offset = next_data_offset.saturating_add(len);
+                    match expr {
+                        Expr::Str(s) => {
+                            let bytes = s.as_bytes();
+                            let ptr = next_data_offset;
+                            let len = bytes.len() as u32;
+                            next_data_offset = next_data_offset.saturating_add(len);
 
-                    let offset = ConstExpr::i32_const(ptr as i32);
-                    data.active(0, &offset, bytes.iter().copied());
+                            let offset = ConstExpr::i32_const(ptr as i32);
+                            data.active(0, &offset, bytes.iter().copied());
 
-                    f.instruction(&Instruction::I32Const(ptr as i32));
-                    f.instruction(&Instruction::I32Const(len as i32));
-                    f.instruction(&Instruction::Call(0));
+                            f.instruction(&Instruction::I32Const(ptr as i32));
+                            f.instruction(&Instruction::I32Const(len as i32));
+                            f.instruction(&Instruction::Call(0));
+                        }
+                        Expr::Call { callee, .. } => {
+                            // allow printing the result of a string-returning import.
+                            if !matches!(import_rets.get(callee), Some(Type::String)) {
+                                return Err(CodegenError::PrintNonLiteral);
+                            }
+                            emit_expr(
+                                &mut f,
+                                expr,
+                                &locals,
+                                &fn_indices,
+                                &import_sigs,
+                                &mut data,
+                                &mut next_data_offset,
+                            )?;
+                            // stack has (ptr,len)
+                            f.instruction(&Instruction::Call(0));
+                        }
+                        _ => return Err(CodegenError::PrintNonLiteral),
+                    }
                 }
                 Stmt::Return(expr) => {
                     emit_expr(&mut f, expr, &locals, &fn_indices, &import_sigs, &mut data, &mut next_data_offset)?;
@@ -257,6 +300,19 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
 
         codes.function(&f);
     }
+
+    // allocator code (last defined fn)
+    // fn __alloc(len:i32)->i32 { let old=heap; heap+=len; return old }
+    let mut alloc_fn = WasmFunction::new([]);
+    alloc_fn.instruction(&Instruction::GlobalGet(0));
+    alloc_fn.instruction(&Instruction::LocalGet(0));
+    alloc_fn.instruction(&Instruction::I32Add);
+    alloc_fn.instruction(&Instruction::GlobalSet(0));
+    alloc_fn.instruction(&Instruction::GlobalGet(0));
+    alloc_fn.instruction(&Instruction::LocalGet(0));
+    alloc_fn.instruction(&Instruction::I32Sub);
+    alloc_fn.instruction(&Instruction::End);
+    codes.function(&alloc_fn);
 
     module.section(&codes);
     module.section(&data);

@@ -19,7 +19,9 @@
   - `import fn <name>(<params>): <type>`
   - `import fn <name>(<params>) <type>`
   - module名は v0 では固定で `env`（Node/Browserホスト側の `env.<name>` に繋がる）
-  - ABI (v0): `string` は wasm import 上は `(i32 ptr, i32 len)` にlowering
+  - ABI (v0):
+  - `string` param は wasm import 上は `(i32 ptr, i32 len)` にlowering
+  - `string` return は wasm import 上は `(i32 ptr, i32 len)`（multi-value）にlowering。ホストは `__alloc(len)` で確保して書き込む
 - Function:
   - TS風: `fn <name>(<params>): <type> { <stmts> }`
   - V風:  `fn <name>(<params>) <type> { <stmts> }`
