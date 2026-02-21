@@ -30,7 +30,10 @@ wasmchi-cli run --target node main.wm
 ## 制約（現状）
 - TSの型はまだ全部は無理：`string`, `number`, `void` だけ対応。
 - `number` は今は `i32` に落としてる（将来 `f64` も欲しい）。
-- optional引数（例: `size?: number`）は「渡す前提」。省略/デフォルト/overload解決は後で。
+- optional引数（例: `size?: number`）は簡易対応：
+  - 呼び出しが0引数なら0引数シグネチャを選ぶ
+  - 呼び出しが1引数なら1引数シグネチャを選ぶ
+  （呼び出し側の引数個数はかなり雑なスキャンで推定してる）
 
 ## サンプル
 - `samples/npm-auto/`（host.mjs無し）

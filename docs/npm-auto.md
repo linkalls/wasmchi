@@ -31,7 +31,10 @@ and the source contains `import { ... } from "npm:<pkg>"`, the runner will:
 ## Limits (current)
 - Only a small set of TS types is supported (`string`, `number`, `void`).
 - `number` is lowered to `i32` for now.
-- Optional params (e.g. `size?: number`) are treated as *present* (you pass the arg). Overload/default support is planned.
+- Optional params (e.g. `size?: number`) are supported in a simple way:
+  - if you call it with 0 args, runner picks the 0-arg signature
+  - if you call it with 1 arg, runner picks the 1-arg signature
+  (call-site arity is inferred with a naive scan)
 
 ## Samples
 - `samples/npm-auto/` (no host.mjs)

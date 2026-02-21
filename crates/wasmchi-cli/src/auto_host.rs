@@ -51,6 +51,15 @@ pub fn parse_npm_imports(src: &str) -> Vec<(String, Vec<String>)> {
 /// Overloads:
 /// - we pick the *first* overload that we can fully lower.
 pub fn infer_fn_sig(dts: &str, name: &str) -> Option<(Vec<&'static str>, &'static str)> {
+    infer_fn_sig_with_optional(dts, name).map(|(req, _all, ret)| (req, ret))
+}
+
+/// Like `infer_fn_sig`, but also returns the full param list including optional params.
+/// Return: (required_params, all_params, ret)
+pub fn infer_fn_sig_with_optional(
+    dts: &str,
+    name: &str,
+) -> Option<(Vec<&'static str>, Vec<&'static str>, &'static str)> {
     // 1) Try `export function` (support overloads by scanning all occurrences)
     let needle = format!("export function {name}");
     let mut search_from = 0;
@@ -76,9 +85,9 @@ pub fn infer_fn_sig(dts: &str, name: &str) -> Option<(Vec<&'static str>, &'stati
         let open = after.find('(')?;
         let close = after[open + 1..].find(')')? + open + 1;
         let params_slice = &after[open + 1..close];
-        let params = infer_params(params_slice)?;
+        let (req, all) = infer_params_with_optional(params_slice)?;
 
-        return Some((params, ret));
+        return Some((req, all, ret));
     }
 
     None
@@ -89,7 +98,10 @@ pub fn infer_fn_ret_type(dts: &str, name: &str) -> Option<&'static str> {
     infer_fn_sig(dts, name).map(|(_, r)| r)
 }
 
-fn infer_sig_from_export_function_at(dts: &str, start: usize) -> Option<(Vec<&'static str>, &'static str)> {
+fn infer_sig_from_export_function_at(
+    dts: &str,
+    start: usize,
+) -> Option<(Vec<&'static str>, Vec<&'static str>, &'static str)> {
     let after = &dts[start..];
 
     // params are inside (...)
@@ -99,7 +111,7 @@ fn infer_sig_from_export_function_at(dts: &str, start: usize) -> Option<(Vec<&'s
         return None;
     }
     let params_slice = &after[open_paren + 1..close_paren];
-    let params = infer_params(params_slice)?;
+    let (req, all) = infer_params_with_optional(params_slice)?;
 
     // return after `):`
     let after_paren = after[close_paren + 1..].trim_start();
@@ -107,16 +119,18 @@ fn infer_sig_from_export_function_at(dts: &str, start: usize) -> Option<(Vec<&'s
     let ret_tok = take_ident(after_colon);
     let ret = map_ret_token(ret_tok, after, Some(close_paren))?;
 
-    Some((params, ret))
+    Some((req, all, ret))
 }
 
-fn infer_params(params_slice: &str) -> Option<Vec<&'static str>> {
+fn infer_params_with_optional(params_slice: &str) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
     let s = params_slice.trim();
     if s.is_empty() {
-        return Some(vec![]);
+        return Some((vec![], vec![]));
     }
 
-    let mut out = Vec::new();
+    let mut req = Vec::new();
+    let mut all = Vec::new();
+
     // naive split by ',' (good enough for simple d.ts)
     for part in s.split(',') {
         let part = part.trim();
@@ -125,6 +139,9 @@ fn infer_params(params_slice: &str) -> Option<Vec<&'static str>> {
         }
         // param: `name?: number` or `name: string`
         let colon = part.find(':')?;
+        let name_part = part[..colon].trim();
+        let is_optional = name_part.ends_with('?');
+
         let ty = part[colon + 1..].trim();
         let ty_tok = take_ident(ty);
         let mapped = match ty_tok {
@@ -132,10 +149,14 @@ fn infer_params(params_slice: &str) -> Option<Vec<&'static str>> {
             "number" => "i32",
             _ => return None,
         };
-        out.push(mapped);
+
+        all.push(mapped);
+        if !is_optional {
+            req.push(mapped);
+        }
     }
 
-    Some(out)
+    Some((req, all))
 }
 
 fn take_ident(s: &str) -> &str {
@@ -187,7 +208,8 @@ export function foo(x: number): number
     #[test]
     fn infer_export_function_params_optional_number() {
         let dts = r#"export function nanoid(size?: number): string"#;
-        assert_eq!(infer_fn_sig(dts, "nanoid"), Some((vec!["i32"], "string")));
+        // optional param is not required
+        assert_eq!(infer_fn_sig(dts, "nanoid"), Some((vec![], "string")));
     }
 
     #[test]

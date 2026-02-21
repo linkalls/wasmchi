@@ -55,20 +55,36 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
     auto_host::ensure_bun_install(project_dir);
 
     // Infer signatures and rewrite source by replacing TS-like imports with `import fn`.
-    // v0: only return type inference, params empty.
     let mut rewritten = String::new();
     let mut import_fns = Vec::new();
+
+    // naive call-site arity scan (so optional params can be chosen when used)
+    let mut call_arity = std::collections::HashMap::<String, usize>::new();
+    for (_pkg, names) in &imports {
+        for name in names {
+            let maxa = max_call_arity(src, name);
+            call_arity.insert(name.clone(), maxa);
+        }
+    }
 
     for (pkg, names) in &imports {
         if let Some(dts) = auto_host::read_pkg_dts(project_dir, pkg) {
             for name in names {
-                if let Some((params, ret)) = auto_host::infer_fn_sig(&dts, name) {
-                    let p = params
+                if let Some((req, all, ret)) = auto_host::infer_fn_sig_with_optional(&dts, name) {
+                    let want = *call_arity.get(name).unwrap_or(&req.len());
+                    let chosen: Vec<&'static str> = if want <= req.len() {
+                        req
+                    } else {
+                        all.into_iter().take(want).collect()
+                    };
+
+                    let p = chosen
                         .into_iter()
                         .enumerate()
                         .map(|(i, ty)| format!("a{i}: {ty}"))
                         .collect::<Vec<_>>()
                         .join(", ");
+
                     import_fns.push(format!("import fn {name}({p}): {ret}"));
                 } else {
                     // fallback
@@ -112,6 +128,55 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
     let host = auto_host::write_auto_host(&tmp_dir, &imports);
 
     (final_src, Some(host))
+}
+
+fn max_call_arity(src: &str, name: &str) -> usize {
+    // super naive: count commas inside `name(...)` occurrences on a single line.
+    // good enough for v0 samples.
+    let mut maxa = 0usize;
+    for line in src.lines() {
+        let mut s = line;
+        loop {
+            let Some(i) = s.find(name) else { break; };
+            s = &s[i + name.len()..];
+            let s_trim = s.trim_start();
+            if !s_trim.starts_with('(') {
+                continue;
+            }
+            let mut depth = 0i32;
+            let mut commas = 0usize;
+            let mut started = false;
+            for ch in s_trim.chars() {
+                if ch == '(' {
+                    depth += 1;
+                    started = true;
+                    continue;
+                }
+                if !started {
+                    continue;
+                }
+                if ch == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                if depth == 1 && ch == ',' {
+                    commas += 1;
+                }
+            }
+            // determine args: if we saw at least '()' then started true.
+            // empty args => 0, else commas+1
+            // heuristic: if there's any non-space between parens
+            if let Some(end) = s_trim.find(')') {
+                let inside = &s_trim[1..end].trim();
+                let argc = if inside.is_empty() { 0 } else { commas + 1 };
+                maxa = maxa.max(argc);
+            }
+        }
+    }
+    maxa
 }
 
 fn json_str(s: impl AsRef<str>) -> String {
