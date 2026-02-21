@@ -33,28 +33,41 @@ impl Parser {
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
         if self.eat_export() {
+            let f = self.parse_fn_after_export()?;
+            Ok(Item::ExportFn(f))
+        } else if matches!(self.peek().kind, lexer::TokenKind::Fn) {
             self.expect_fn()?;
-            let name = self.expect_ident()?;
-            self.expect(lexer::TokenKind::LParen, "(")?;
-            let params = self.parse_params_ts()?;
-            self.expect(lexer::TokenKind::RParen, ")")?;
-
-            // Return type: TS style `: i32` or V style `i32`
-            let ret_ty = if self.eat(lexer::TokenKind::Colon) {
-                self.parse_type()?
-            } else {
-                // allow optional return type (default i32 for now?)
-                // v0: require ret type
-                self.parse_type()?
-            };
-            self.expect(lexer::TokenKind::LBrace, "{")?;
-            self.skip_newlines();
-            let body = self.parse_block_stmts()?;
-            self.expect(lexer::TokenKind::RBrace, "}")?;
-            Ok(Item::ExportFn(Function { name, params, ret_ty, body }))
+            let f = self.parse_fn_rest()?;
+            Ok(Item::Fn(f))
         } else {
-            Err(self.err("expected 'export'"))
+            Err(self.err("expected 'export' or 'fn'"))
         }
+    }
+
+    fn parse_fn_after_export(&mut self) -> Result<Function, ParseError> {
+        self.expect_fn()?;
+        self.parse_fn_rest()
+    }
+
+    fn parse_fn_rest(&mut self) -> Result<Function, ParseError> {
+        let name = self.expect_ident()?;
+        self.expect(lexer::TokenKind::LParen, "(")?;
+        let params = self.parse_params_ts()?;
+        self.expect(lexer::TokenKind::RParen, ")")?;
+
+        // Return type: TS style `: i32` or V style `i32`
+        let ret_ty = if self.eat(lexer::TokenKind::Colon) {
+            self.parse_type()?
+        } else {
+            self.parse_type()?
+        };
+
+        self.expect(lexer::TokenKind::LBrace, "{")?;
+        self.skip_newlines();
+        let body = self.parse_block_stmts()?;
+        self.expect(lexer::TokenKind::RBrace, "}")?;
+
+        Ok(Function { name, params, ret_ty, body })
     }
 
     fn skip_newlines(&mut self) {
@@ -193,9 +206,28 @@ impl Parser {
                 Ok(Expr::Str(s))
             }
             lexer::TokenKind::Ident(s) => {
-                let s = s.clone();
+                let name = s.clone();
                 self.i += 1;
-                Ok(Expr::Var(s))
+                if self.eat(lexer::TokenKind::LParen) {
+                    // call expr
+                    let mut args = Vec::new();
+                    self.skip_newlines();
+                    if !matches!(self.peek().kind, lexer::TokenKind::RParen) {
+                        loop {
+                            let arg = self.parse_expr()?;
+                            args.push(arg);
+                            if self.eat(lexer::TokenKind::Comma) {
+                                self.skip_newlines();
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    self.expect(lexer::TokenKind::RParen, ")")?;
+                    Ok(Expr::Call { callee: name, args })
+                } else {
+                    Ok(Expr::Var(name))
+                }
             }
             lexer::TokenKind::LParen => {
                 self.i += 1;

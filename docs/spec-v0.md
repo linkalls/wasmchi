@@ -15,8 +15,11 @@
 
 ## 3. Syntax (v0)
 ### Top-level
-- TS風: `export fn <name>(<params>): <type> { <stmts> }`
-- V風:  `export fn <name>(<params>) <type> { <stmts> }`
+- Function:
+  - TS風: `fn <name>(<params>): <type> { <stmts> }`
+  - V風:  `fn <name>(<params>) <type> { <stmts> }`
+- Export:
+  - `export fn ...`（上のfunction構文に `export` を付ける）
 
 paramsはTS風 `a: i32` / V風 `a i32` どっちも受理する（v0は混在も許すけど、後で締めるかも）。
 
@@ -39,6 +42,7 @@ export fn main(): i32 {
 - 整数リテラル（10進）
 - 文字列リテラル（`"..."`。最小エスケープ: `\n \t \\ \"`）
 - 変数参照
+- 関数呼び出し: `<name>(a, b, ...)`
 - `+ - * /`（i32）
 - `+`（string: v0は **リテラル + リテラルのみ** コンパイル時結合）
 - 括弧 `(<expr>)`

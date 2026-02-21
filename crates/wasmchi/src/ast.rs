@@ -6,6 +6,7 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     ExportFn(Function),
+    Fn(Function),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,7 @@ pub enum Expr {
     Int(i32),
     Str(String),
     Var(String),
+    Call { callee: String, args: Vec<Expr> },
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
 }
 
