@@ -1,0 +1,291 @@
+use thiserror::Error;
+
+use crate::{ast::*, lexer};
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[error("parse error at {pos}: {message}")]
+pub struct ParseError {
+    pub pos: usize,
+    pub message: String,
+}
+
+pub fn parse_program(source: &str) -> Result<Program, ParseError> {
+    let tokens = lexer::lex(source);
+    let mut p = Parser { tokens, i: 0 };
+    p.parse_program()
+}
+
+struct Parser {
+    tokens: Vec<lexer::Token>,
+    i: usize,
+}
+
+impl Parser {
+    fn parse_program(&mut self) -> Result<Program, ParseError> {
+        self.skip_newlines();
+        let mut items = Vec::new();
+        while !self.at_eof() {
+            items.push(self.parse_item()?);
+            self.skip_newlines();
+        }
+        Ok(Program { items })
+    }
+
+    fn parse_item(&mut self) -> Result<Item, ParseError> {
+        if self.eat_export() {
+            self.expect_fn()?;
+            let name = self.expect_ident()?;
+            self.expect(lexer::TokenKind::LParen, "(")?;
+            let params = self.parse_params_ts()?;
+            self.expect(lexer::TokenKind::RParen, ")")?;
+
+            // Return type: TS style `: i32` or V style `i32`
+            let ret_ty = if self.eat(lexer::TokenKind::Colon) {
+                self.parse_type()?
+            } else {
+                // allow optional return type (default i32 for now?)
+                // v0: require ret type
+                self.parse_type()?
+            };
+            self.expect(lexer::TokenKind::LBrace, "{")?;
+            self.skip_newlines();
+            let body = self.parse_block_stmts()?;
+            self.expect(lexer::TokenKind::RBrace, "}")?;
+            Ok(Item::ExportFn(Function { name, params, ret_ty, body }))
+        } else {
+            Err(self.err("expected 'export'"))
+        }
+    }
+
+    fn skip_newlines(&mut self) {
+        while matches!(self.peek().kind, lexer::TokenKind::Newline) {
+            self.i += 1;
+        }
+    }
+
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
+        match &self.peek().kind {
+            lexer::TokenKind::Ident(s) if s == "i32" => {
+                self.i += 1;
+                Ok(Type::I32)
+            }
+            lexer::TokenKind::Ident(s) if s == "string" => {
+                self.i += 1;
+                Ok(Type::String)
+            }
+            _ => Err(self.err("expected type")),
+        }
+    }
+
+    fn parse_block_stmts(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let mut stmts = Vec::new();
+        while !matches!(self.peek().kind, lexer::TokenKind::RBrace | lexer::TokenKind::Eof) {
+            if matches!(self.peek().kind, lexer::TokenKind::Newline) {
+                self.skip_newlines();
+                continue;
+            }
+            stmts.push(self.parse_stmt()?);
+            // v0: statement separator is newline or '}'
+            if matches!(self.peek().kind, lexer::TokenKind::Newline) {
+                self.skip_newlines();
+            } else if matches!(self.peek().kind, lexer::TokenKind::RBrace) {
+                // ok
+            } else {
+                return Err(self.err("expected newline"));
+            }
+        }
+        Ok(stmts)
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        match &self.peek().kind {
+            lexer::TokenKind::Let => {
+                self.i += 1;
+                let name = self.expect_ident()?;
+                self.expect(lexer::TokenKind::Equal, "=")?;
+                let expr = self.parse_expr()?;
+                Ok(Stmt::Let { name, expr })
+            }
+            lexer::TokenKind::Return => {
+                self.i += 1;
+                let expr = self.parse_expr()?;
+                Ok(Stmt::Return(expr))
+            }
+            lexer::TokenKind::Ident(s) if s == "print" => {
+                // print(<expr>) as statement
+                self.i += 1;
+                self.expect(lexer::TokenKind::LParen, "(")?;
+                let expr = self.parse_expr()?;
+                self.expect(lexer::TokenKind::RParen, ")")?;
+                Ok(Stmt::Print(expr))
+            }
+            lexer::TokenKind::Ident(_) => {
+                // V-ish short declaration: `x := expr`
+                // Only when pattern matches ident followed by :=
+                if let lexer::TokenKind::Ident(name) = &self.peek().kind {
+                    let name = name.clone();
+                    if matches!(self.tokens.get(self.i + 1).map(|t| &t.kind), Some(lexer::TokenKind::ColonEqual)) {
+                        self.i += 1; // ident
+                        self.i += 1; // :=
+                        let expr = self.parse_expr()?;
+                        return Ok(Stmt::Let { name, expr });
+                    }
+                }
+                let expr = self.parse_expr()?;
+                Ok(Stmt::Expr(expr))
+            }
+            _ => {
+                let expr = self.parse_expr()?;
+                Ok(Stmt::Expr(expr))
+            }
+        }
+    }
+
+    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.parse_add_sub()
+    }
+
+    fn parse_add_sub(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_mul_div()?;
+        loop {
+            let op = match self.peek().kind {
+                lexer::TokenKind::Plus => BinOp::Add,
+                lexer::TokenKind::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.i += 1;
+            let right = self.parse_mul_div()?;
+
+            // v0 convenience: constant-fold string literal concatenation
+            expr = match (op, &expr, &right) {
+                (BinOp::Add, Expr::Str(a), Expr::Str(b)) => Expr::Str(format!("{a}{b}")),
+                _ => Expr::Binary { op, left: Box::new(expr), right: Box::new(right) },
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_mul_div(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            let op = match self.peek().kind {
+                lexer::TokenKind::Star => BinOp::Mul,
+                lexer::TokenKind::Slash => BinOp::Div,
+                _ => break,
+            };
+            self.i += 1;
+            let right = self.parse_primary()?;
+            expr = Expr::Binary { op, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        match &self.peek().kind {
+            lexer::TokenKind::Int(n) => {
+                let n = *n;
+                self.i += 1;
+                Ok(Expr::Int(n))
+            }
+            lexer::TokenKind::Str(s) => {
+                let s = s.clone();
+                self.i += 1;
+                Ok(Expr::Str(s))
+            }
+            lexer::TokenKind::Ident(s) => {
+                let s = s.clone();
+                self.i += 1;
+                Ok(Expr::Var(s))
+            }
+            lexer::TokenKind::LParen => {
+                self.i += 1;
+                let expr = self.parse_expr()?;
+                self.expect(lexer::TokenKind::RParen, ")")?;
+                Ok(expr)
+            }
+            _ => Err(self.err("expected expression")),
+        }
+    }
+
+    fn at_eof(&self) -> bool {
+        matches!(self.peek().kind, lexer::TokenKind::Eof)
+    }
+
+    fn eat_export(&mut self) -> bool {
+        if matches!(self.peek().kind, lexer::TokenKind::Export) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_fn(&mut self) -> Result<(), ParseError> {
+        self.expect(lexer::TokenKind::Fn, "fn")?;
+        Ok(())
+    }
+
+    fn parse_params_ts(&mut self) -> Result<Vec<Param>, ParseError> {
+        let mut params = Vec::new();
+        self.skip_newlines();
+        if matches!(self.peek().kind, lexer::TokenKind::RParen) {
+            return Ok(params);
+        }
+
+        loop {
+            // allow either TS style: name: ty  OR V style: name ty
+            let name = self.expect_ident()?;
+            let ty = if self.eat(lexer::TokenKind::Colon) {
+                self.parse_type()?
+            } else {
+                self.parse_type()?
+            };
+            params.push(Param { name, ty });
+
+            if self.eat(lexer::TokenKind::Comma) {
+                self.skip_newlines();
+                continue;
+            }
+            break;
+        }
+
+        Ok(params)
+    }
+
+    fn expect_ident(&mut self) -> Result<String, ParseError> {
+        match &self.peek().kind {
+            lexer::TokenKind::Ident(s) => {
+                let s = s.clone();
+                self.i += 1;
+                Ok(s)
+            }
+            _ => Err(self.err("expected identifier")),
+        }
+    }
+
+    fn expect(&mut self, kind: lexer::TokenKind, expected: &str) -> Result<(), ParseError> {
+        if std::mem::discriminant(&self.peek().kind) == std::mem::discriminant(&kind) {
+            self.i += 1;
+            Ok(())
+        } else {
+            Err(self.err(format!("expected '{expected}'")))
+        }
+    }
+
+    fn eat(&mut self, kind: lexer::TokenKind) -> bool {
+        if std::mem::discriminant(&self.peek().kind) == std::mem::discriminant(&kind) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> &lexer::Token {
+        &self.tokens[self.i]
+    }
+
+    fn err(&self, message: impl Into<String>) -> ParseError {
+        ParseError { pos: self.peek().pos, message: message.into() }
+    }
+}

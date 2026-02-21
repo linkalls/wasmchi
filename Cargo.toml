@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/wasmchi",
+  "crates/wasmchi-cli",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+thiserror = "2"
+insta = { version = "1", features = ["glob"] }

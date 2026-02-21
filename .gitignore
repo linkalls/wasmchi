@@ -1,4 +1,9 @@
-
 # Rust
 /wasmchi-rs/target/
+/target/
 **/target/
+
+# misc
+.DS_Store
+*.swp
+*.swo
