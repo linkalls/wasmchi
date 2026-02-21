@@ -30,11 +30,25 @@ and the source contains `import { ... } from "npm:<pkg>"`, the runner will:
 
 ## Limits (current)
 - Only a small set of TS types is supported (`string`, `number`, `void`).
-- `number` is lowered to `i32` for now.
+- `number` is lowered to `f64`.
 - Optional params (e.g. `size?: number`) are supported in a simple way:
   - if you call it with 0 args, runner picks the 0-arg signature
   - if you call it with 1 arg, runner picks the 1-arg signature
   (call-site arity is inferred with a naive scan)
+
+## Overrides (directives)
+You can steer inference with comments:
+
+- Force `number` to be treated as `i32` in this file:
+  ```
+  // wasmchi:number=i32
+  ```
+
+- Force a specific signature for a single imported symbol:
+  ```
+  // wasmchi:sig nanoid(): string
+  // wasmchi:sig foo(a0: i32, a1: string): void
+  ```
 
 ## Samples
 - `samples/npm-auto/` (no host.mjs)

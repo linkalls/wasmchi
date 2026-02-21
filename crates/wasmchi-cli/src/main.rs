@@ -45,6 +45,8 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
         return (src.to_string(), None);
     }
 
+    let directives = parse_wasmchi_directives(src);
+
     let project_dir = input_path.parent().unwrap_or_else(|| std::path::Path::new("."));
 
     // deps: pin to "latest" for now
@@ -72,13 +74,30 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
     for (pkg, names) in &imports {
         if let Some(dts) = auto_host::read_pkg_dts(project_dir, pkg) {
             for name in names {
+                if let Some(sig) = directives.sig_overrides.get(name) {
+                    import_fns.push(format!("import fn {name}{}", sig));
+                    continue;
+                }
+
                 if let Some((req, all, ret)) = auto_host::infer_fn_sig_with_optional(&dts, name) {
                     let want = *call_arity.get(name).unwrap_or(&req.len());
-                    let chosen: Vec<&'static str> = if want <= req.len() {
+                    let mut chosen: Vec<&'static str> = if want <= req.len() {
                         req
                     } else {
                         all.into_iter().take(want).collect()
                     };
+                    let mut ret = ret;
+
+                    // Optional directive: treat TS `number` as i32 (i.e. replace f64 -> i32)
+                    if directives.number_i32 {
+                        chosen = chosen
+                            .into_iter()
+                            .map(|t| if t == "f64" { "i32" } else { t })
+                            .collect();
+                        if ret == "f64" {
+                            ret = "i32";
+                        }
+                    }
 
                     let p = chosen
                         .into_iter()
@@ -90,7 +109,10 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
                     import_fns.push(format!("import fn {name}({p}): {ret}"));
                 } else {
                     // fallback
-                    let ret = auto_host::infer_fn_ret_type(&dts, name).unwrap_or("i32");
+                    let mut ret = auto_host::infer_fn_ret_type(&dts, name).unwrap_or("i32");
+                    if directives.number_i32 && ret == "f64" {
+                        ret = "i32";
+                    }
                     import_fns.push(format!("import fn {name}(): {ret}"));
                 }
             }
@@ -130,6 +152,58 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
     let host = auto_host::write_auto_host(&tmp_dir, &imports);
 
     (final_src, Some(host))
+}
+
+#[derive(Default)]
+struct WasmchiDirectives {
+    number_i32: bool,
+    // name -> "(a0: i32, ...): ret"
+    sig_overrides: std::collections::HashMap<String, String>,
+}
+
+fn parse_wasmchi_directives(src: &str) -> WasmchiDirectives {
+    let mut d = WasmchiDirectives::default();
+
+    for line in src.lines() {
+        let line = line.trim();
+        if !line.starts_with("//") {
+            continue;
+        }
+        let rest = line.trim_start_matches("//").trim();
+        if !rest.starts_with("wasmchi:") {
+            continue;
+        }
+        let rest = rest.trim_start_matches("wasmchi:").trim();
+
+        if rest == "number=i32" {
+            d.number_i32 = true;
+            continue;
+        }
+
+        if let Some(spec) = rest.strip_prefix("sig ") {
+            // format: sig name(<types...>): <ret>
+            // example: sig nanoid(): string
+            let spec = spec.trim();
+            // find name
+            let Some(paren) = spec.find('(') else { continue; };
+            let name = spec[..paren].trim();
+            let after = &spec[paren..];
+            // accept exact suffix "(<...>): <ret>" or "(<...>) <ret>" by normalizing to ":"
+            // We'll just store the tail starting from '('.
+            if !name.is_empty() {
+                // normalize `) <ret>` to `): <ret>` if needed
+                let mut tail = after.to_string();
+                if let Some(idx) = tail.rfind(") ") {
+                    if !tail[idx..].contains(":") {
+                        tail = format!("{}: {}", &tail[..idx + 1], tail[idx + 2..].trim());
+                    }
+                }
+                d.sig_overrides.insert(name.to_string(), tail);
+            }
+        }
+    }
+
+    d
 }
 
 fn max_call_arity(src: &str, name: &str) -> usize {

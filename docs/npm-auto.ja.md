@@ -29,11 +29,25 @@ wasmchi-cli run --target node main.wm
 
 ## 制約（現状）
 - TSの型はまだ全部は無理：`string`, `number`, `void` だけ対応。
-- `number` は今は `i32` に落としてる（将来 `f64` も欲しい）。
+- `number` は `f64` に落とす。
 - optional引数（例: `size?: number`）は簡易対応：
   - 呼び出しが0引数なら0引数シグネチャを選ぶ
   - 呼び出しが1引数なら1引数シグネチャを選ぶ
   （呼び出し側の引数個数はかなり雑なスキャンで推定してる）
+
+## 上書き（ディレクティブ）
+コメントで推論を誘導できる：
+
+- このファイルでは `number` を `i32` 扱いにしたい：
+  ```
+  // wasmchi:number=i32
+  ```
+
+- 特定シンボルのシグネチャを固定：
+  ```
+  // wasmchi:sig nanoid(): string
+  // wasmchi:sig foo(a0: i32, a1: string): void
+  ```
 
 ## サンプル
 - `samples/npm-auto/`（host.mjs無し）
