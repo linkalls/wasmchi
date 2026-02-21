@@ -1,3 +1,5 @@
+mod auto_host;
+
 use std::{env, fs, path::PathBuf, process};
 
 fn import_meta_from_source(src: &str) -> String {
@@ -33,6 +35,72 @@ fn import_meta_from_source(src: &str) -> String {
     }
 
     format!("[{}]", items.join(","))
+}
+
+fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<PathBuf>) {
+    let imports = auto_host::parse_npm_imports(src);
+    if imports.is_empty() {
+        return (src.to_string(), None);
+    }
+
+    let project_dir = input_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+    // deps: pin to "latest" for now
+    let mut deps = std::collections::BTreeMap::<String, String>::new();
+    for (pkg, _names) in &imports {
+        deps.insert(pkg.clone(), "latest".to_string());
+    }
+
+    auto_host::upsert_package_json_deps(project_dir, &deps);
+    auto_host::ensure_bun_install(project_dir);
+
+    // Infer signatures and rewrite source by replacing TS-like imports with `import fn`.
+    // v0: only return type inference, params empty.
+    let mut rewritten = String::new();
+    let mut import_fns = Vec::new();
+
+    for (pkg, names) in &imports {
+        if let Some(dts) = auto_host::read_pkg_dts(project_dir, pkg) {
+            for name in names {
+                let ret = auto_host::infer_fn_ret_type(&dts, name).unwrap_or("i32");
+                import_fns.push(format!("import fn {name}(): {ret}"));
+            }
+        } else {
+            for name in names {
+                import_fns.push(format!("import fn {name}(): i32"));
+            }
+        }
+    }
+
+    // Remove original TS-like import lines
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import") && trimmed.contains("from") && trimmed.contains("{") {
+            continue;
+        }
+        if trimmed.starts_with("import") && trimmed.contains("{") && trimmed.contains("}") {
+            // e.g. import { nanoid } from "npm:nanoid"
+            continue;
+        }
+        rewritten.push_str(line);
+        rewritten.push('\n');
+    }
+
+    // Prepend import fn block
+    let mut final_src = String::new();
+    for l in import_fns {
+        final_src.push_str(&l);
+        final_src.push('\n');
+    }
+    final_src.push('\n');
+    final_src.push_str(&rewritten);
+
+    // Write auto host
+    let tmp_dir = std::env::temp_dir().join("wasmchi");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let host = auto_host::write_auto_host(&tmp_dir, &imports);
+
+    (final_src, Some(host))
 }
 
 fn json_str(s: impl AsRef<str>) -> String {
@@ -79,7 +147,8 @@ fn main() {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| input_path.with_extension("wasm"));
 
-            let (_src, wasm) = compile_file(&input_path);
+            let src = read_source(&input_path);
+            let wasm = compile_source(&src);
 
             fs::write(&out_path, wasm).unwrap_or_else(|e| {
                 eprintln!("failed to write {}: {e}", out_path.display());
@@ -155,25 +224,43 @@ fn main() {
     }
 }
 
-fn compile_file(path: &PathBuf) -> (String, Vec<u8>) {
-    let src = fs::read_to_string(path).unwrap_or_else(|e| {
+fn read_source(path: &PathBuf) -> String {
+    fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("failed to read {}: {e}", path.display());
         process::exit(1);
-    });
+    })
+}
 
-    let wasm = wasmchi::compile_to_wasm(&src).unwrap_or_else(|e| {
+fn compile_source(src: &str) -> Vec<u8> {
+    wasmchi::compile_to_wasm(src).unwrap_or_else(|e| {
         eprintln!("compile error: {e}");
         process::exit(1);
-    });
-
-    (src, wasm)
+    })
 }
 
 fn run_node(input_path: PathBuf, host_module: Option<PathBuf>) {
-    let (src, wasm) = compile_file(&input_path);
+    let src = read_source(&input_path);
 
-    let host_module = host_module.and_then(|p| p.canonicalize().ok());
-    let import_meta = import_meta_from_source(&src);
+    let mut host_module = host_module.and_then(|p| p.canonicalize().ok());
+
+    // Auto-host for TS-like npm imports: `import { x } from "npm:pkg"`
+    // If user didn't pass --host, we generate one.
+    let (src2, auto_host) = auto_host_from_source(&input_path, &src);
+    if host_module.is_none() {
+        if let Some(p) = auto_host {
+            host_module = Some(p);
+        }
+    }
+
+    if std::env::var("WASMCHI_DUMP_SRC").is_ok() {
+        eprintln!("--- wasmchi source (transformed) ---\n{src2}\n---");
+    }
+
+    // Compile transformed source.
+    let wasm = compile_source(&src2);
+    let src_final = src2;
+
+    let import_meta = import_meta_from_source(&src_final);
 
     let tmp_dir = std::env::temp_dir().join("wasmchi");
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -209,7 +296,8 @@ fn run_node(input_path: PathBuf, host_module: Option<PathBuf>) {
 }
 
 fn bundle_browser(input_path: PathBuf, out_dir: PathBuf) {
-    let (_src, wasm) = compile_file(&input_path);
+    let src = read_source(&input_path);
+    let wasm = compile_source(&src);
 
     let _ = std::fs::create_dir_all(&out_dir);
 

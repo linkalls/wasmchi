@@ -1,0 +1,6 @@
+import { nanoid } from "npm:nanoid"
+
+export fn main(): i32 {
+  print(nanoid())
+  return 0
+}

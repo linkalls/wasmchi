@@ -1,0 +1,8 @@
+{
+  "name": "wasmchi-project",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "nanoid": "latest"
+  }
+}
