@@ -5,9 +5,15 @@ pub enum TokenKind {
     Fn,
     Let,
     Return,
+    If,
+    Else,
+    While,
+    True,
+    False,
 
     Ident(String),
     Int(i32),
+    Float(u64), // f64::to_bits()
     Str(String),
 
     LParen,
@@ -23,6 +29,12 @@ pub enum TokenKind {
     Equal,
     ColonEqual,
     Comma,
+    EqEq,
+    BangEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
 
     Newline,
     Eof,
@@ -77,7 +89,41 @@ pub fn lex(source: &str) -> Vec<Token> {
                     i += 1;
                 }
             }
-            b'=' => { tokens.push(Token { kind: TokenKind::Equal, pos: i }); i += 1; }
+            b'=' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    tokens.push(Token { kind: TokenKind::EqEq, pos: i });
+                    i += 2;
+                } else {
+                    tokens.push(Token { kind: TokenKind::Equal, pos: i });
+                    i += 1;
+                }
+            }
+            b'!' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    tokens.push(Token { kind: TokenKind::BangEq, pos: i });
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            b'<' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    tokens.push(Token { kind: TokenKind::LtEq, pos: i });
+                    i += 2;
+                } else {
+                    tokens.push(Token { kind: TokenKind::Lt, pos: i });
+                    i += 1;
+                }
+            }
+            b'>' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    tokens.push(Token { kind: TokenKind::GtEq, pos: i });
+                    i += 2;
+                } else {
+                    tokens.push(Token { kind: TokenKind::Gt, pos: i });
+                    i += 1;
+                }
+            }
             b',' => { tokens.push(Token { kind: TokenKind::Comma, pos: i }); i += 1; }
             _ => {
                 if b == b'"' {
@@ -114,9 +160,24 @@ pub fn lex(source: &str) -> Vec<Token> {
                     while i < bytes.len() && (b'0'..=b'9').contains(&bytes[i]) {
                         i += 1;
                     }
-                    let s = &source[start..i];
-                    let n: i32 = s.parse().unwrap_or(0);
-                    tokens.push(Token { kind: TokenKind::Int(n), pos: start });
+                    // float literal: digits '.' digits
+                    if i < bytes.len()
+                        && bytes[i] == b'.'
+                        && i + 1 < bytes.len()
+                        && (b'0'..=b'9').contains(&bytes[i + 1])
+                    {
+                        i += 1; // consume '.'
+                        while i < bytes.len() && (b'0'..=b'9').contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        let s = &source[start..i];
+                        let v: f64 = s.parse().unwrap_or(0.0);
+                        tokens.push(Token { kind: TokenKind::Float(v.to_bits()), pos: start });
+                    } else {
+                        let s = &source[start..i];
+                        let n: i32 = s.parse().unwrap_or(0);
+                        tokens.push(Token { kind: TokenKind::Int(n), pos: start });
+                    }
                 } else if is_ident_start(b) {
                     let start = i;
                     i += 1;
@@ -130,6 +191,11 @@ pub fn lex(source: &str) -> Vec<Token> {
                         "fn" => TokenKind::Fn,
                         "let" => TokenKind::Let,
                         "return" => TokenKind::Return,
+                        "if" => TokenKind::If,
+                        "else" => TokenKind::Else,
+                        "while" => TokenKind::While,
+                        "true" => TokenKind::True,
+                        "false" => TokenKind::False,
                         _ => TokenKind::Ident(s.to_string()),
                     };
                     tokens.push(Token { kind, pos: start });

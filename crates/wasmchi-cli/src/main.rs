@@ -17,6 +17,7 @@ fn import_meta_from_source(src: &str) -> String {
                 .map(|p| match p.ty {
                     wasmchi::Type::I32 => "i32",
                     wasmchi::Type::F64 => "f64",
+                    wasmchi::Type::Bool => "i32",
                     wasmchi::Type::String => "string",
                     wasmchi::Type::Void => "void",
                 })
@@ -24,6 +25,7 @@ fn import_meta_from_source(src: &str) -> String {
             let ret: &'static str = match im.ret_ty {
                 wasmchi::Type::I32 => "i32",
                 wasmchi::Type::F64 => "f64",
+                wasmchi::Type::Bool => "i32",
                 wasmchi::Type::String => "string",
                 wasmchi::Type::Void => "void",
             };

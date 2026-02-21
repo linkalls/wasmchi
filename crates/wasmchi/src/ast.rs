@@ -35,6 +35,7 @@ pub struct Param {
 pub enum Type {
     I32,
     F64,
+    Bool,
     String,
     Void,
 }
@@ -45,11 +46,15 @@ pub enum Stmt {
     Return(Expr),
     Print(Expr),
     Expr(Expr),
+    If { cond: Expr, then_body: Vec<Stmt>, else_body: Option<Vec<Stmt>> },
+    While { cond: Expr, body: Vec<Stmt> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Int(i32),
+    Float(u64), // f64::to_bits()
+    Bool(bool),
     Str(String),
     Var(String),
     Call { callee: String, args: Vec<Expr> },
@@ -62,4 +67,10 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
