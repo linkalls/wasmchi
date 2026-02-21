@@ -16,10 +16,10 @@
 
 このリポジトリには今これが入ってる：
 
-- **Rust（新・メイン）**: コンパイラ + CLI（`crates/`）
+- **Rust（メイン）**: コンパイラ + CLI（`crates/`）
   - `crates/wasmchi`（ライブラリ）
   - `crates/wasmchi-cli`（CLI）
-- **TypeScript（旧プロトタイプ）**: 以前の実装（Rust版が育ったら段階的に縮退予定）
+- **Legacy Rust（旧実装）**: `wasmchi-rs/`（参照/ツール用に残してる）
 
 ## 言語スナップショット（Rust v0 サブセット）
 

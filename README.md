@@ -16,10 +16,10 @@ Experimental. The Rust rewrite is under active development and currently support
 
 This repo currently contains:
 
-- **Rust (new, active):** compiler + CLI in `crates/`
+- **Rust (active):** compiler + CLI in `crates/`
   - `crates/wasmchi` (library)
   - `crates/wasmchi-cli` (CLI)
-- **TypeScript (legacy/prototype):** older compiler code still present (will be deprecated once Rust reaches feature parity)
+- **Legacy Rust (older):** `wasmchi-rs/` (kept for reference/tools)
 
 ## Language snapshot (Rust v0 subset)
 
