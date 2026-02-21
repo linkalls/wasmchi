@@ -172,6 +172,9 @@
 - v1.0 では **TypeScript compiler API** を使うのが最短（自前 `.d.ts` 解析は地獄）
   - Node/Bun で `typescript` を呼ぶ（CLI が Rust でも、解析だけは node subprocess で良い）
   - 解析結果は JSON で Rust に返す
+- v1.1+ で **tsgo（TypeScript Native / Go版コンパイラ）**をバックエンド候補にする
+  - 狙い: `.d.ts` 解析を高速化、language service 相当の体験改善
+  - 方針: Rust 側は「JSONスキーマ」だけを見るようにして、バックエンド差し替え可能にする
 
 #### 4.3 `.d.ts` で拾うべき “エクスポート形” 全部
 - [ ] `export function foo(...)` / `declare function foo(...)`
