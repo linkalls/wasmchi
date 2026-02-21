@@ -1,39 +1,72 @@
 use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::Command};
 
-/// Parse lines like: `import { nanoid, foo } from "npm:nanoid"`
-pub fn parse_npm_imports(src: &str) -> Vec<(String, Vec<String>)> {
+/// Parsed TS-like imports from `npm:<pkg>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmImport {
+    pub pkg: String,
+    pub named: Vec<String>,
+    pub default_name: Option<String>,
+}
+
+/// Parse lines like:
+/// - `import { nanoid, foo } from "npm:nanoid"`
+/// - `import nanoid from "npm:nanoid"`
+pub fn parse_npm_imports(src: &str) -> Vec<NpmImport> {
     let mut out = Vec::new();
+
     for line in src.lines() {
         let line = line.trim();
         if !line.starts_with("import") {
             continue;
         }
-        // very small parser; v0 only.
-        // import { a, b } from "npm:pkg"
-        let Some(brace_l) = line.find('{') else { continue; };
-        let Some(brace_r) = line.find('}') else { continue; };
+
+        // Find the module spec: ... from "..."
         let Some(from_i) = line.find("from") else { continue; };
-        if from_i < brace_r { continue; }
-        let names_part = &line[brace_l + 1..brace_r];
-        let mut names = Vec::new();
-        for n in names_part.split(',') {
-            let n = n.trim();
-            if !n.is_empty() {
-                names.push(n.to_string());
-            }
-        }
-        if names.is_empty() { continue; }
-        // find first quote after from
-        let rest = &line[from_i + 4..];
-        let rest = rest.trim();
+        let rest = line[from_i + 4..].trim();
         let quote = rest.chars().next();
         let Some(q) = quote.filter(|c| *c == '"' || *c == '\'') else { continue; };
         let rest2 = &rest[1..];
         let Some(endq) = rest2.find(q) else { continue; };
         let spec = &rest2[..endq];
         let spec = spec.strip_prefix("npm:").unwrap_or(spec);
-        out.push((spec.to_string(), names));
+
+        // Named import: { a, b }
+        if let (Some(brace_l), Some(brace_r)) = (line.find('{'), line.find('}')) {
+            if brace_l < from_i && brace_r < from_i {
+                let names_part = &line[brace_l + 1..brace_r];
+                let named = names_part
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>();
+                if !named.is_empty() {
+                    out.push(NpmImport { pkg: spec.to_string(), named, default_name: None });
+                }
+            }
+            continue;
+        }
+
+        // Default import: import foo from "npm:pkg"
+        // token between `import` and `from`
+        let head = line[..from_i].trim();
+        let Some(head) = head.strip_prefix("import") else { continue; };
+        let head = head.trim();
+        // ignore `import * as x from ...` for now
+        if head.starts_with('*') {
+            continue;
+        }
+        // default name is the first token
+        let default_name = head.split_whitespace().next().unwrap_or("").trim();
+        if !default_name.is_empty() {
+            out.push(NpmImport {
+                pkg: spec.to_string(),
+                named: vec![],
+                default_name: Some(default_name.to_string()),
+            });
+        }
     }
+
     out
 }
 
@@ -277,21 +310,34 @@ pub fn read_pkg_dts(project_dir: &Path, pkg: &str) -> Option<String> {
     fs::read_to_string(p).ok()
 }
 
-pub fn write_auto_host(tmp_dir: &Path, imports: &[(String, Vec<String>)]) -> PathBuf {
+pub fn write_auto_host(tmp_dir: &Path, imports: &[NpmImport]) -> PathBuf {
     let mut lines = String::new();
-    for (pkg, names) in imports {
-        lines.push_str("import {");
-        for (i, n) in names.iter().enumerate() {
-            if i > 0 { lines.push_str(", "); }
-            lines.push_str(n);
+
+    for imp in imports {
+        if !imp.named.is_empty() {
+            lines.push_str("import {");
+            for (i, n) in imp.named.iter().enumerate() {
+                if i > 0 {
+                    lines.push_str(", ");
+                }
+                lines.push_str(n);
+            }
+            lines.push_str(&format!("}} from '{}'\n", imp.pkg));
         }
-        lines.push_str(&format!("}} from '{pkg}'\n"));
+        if let Some(def) = &imp.default_name {
+            // Some packages don't have a default export; in that case users should use named imports.
+            // v0 heuristic: import the namespace and pick .default ?? first named export at runtime.
+            lines.push_str(&format!("import * as __wasmchi_{def} from '{}'\n", imp.pkg));
+        }
     }
 
     lines.push_str("\nexport default {\n");
-    for (_pkg, names) in imports {
-        for n in names {
+    for imp in imports {
+        for n in &imp.named {
             lines.push_str(&format!("  {n}: {n},\n"));
+        }
+        if let Some(def) = &imp.default_name {
+            lines.push_str(&format!("  {def}: (__wasmchi_{def}.default ?? __wasmchi_{def}[Object.keys(__wasmchi_{def})[0]]),\n"));
         }
     }
     lines.push_str("}\n");

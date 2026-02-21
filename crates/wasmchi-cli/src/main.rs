@@ -51,8 +51,8 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
 
     // deps: pin to "latest" for now
     let mut deps = std::collections::BTreeMap::<String, String>::new();
-    for (pkg, _names) in &imports {
-        deps.insert(pkg.clone(), "latest".to_string());
+    for imp in &imports {
+        deps.insert(imp.pkg.clone(), "latest".to_string());
     }
 
     auto_host::upsert_package_json_deps(project_dir, &deps);
@@ -64,16 +64,26 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
 
     // naive call-site arity scan (so optional params can be chosen when used)
     let mut call_arity = std::collections::HashMap::<String, usize>::new();
-    for (_pkg, names) in &imports {
-        for name in names {
+    for imp in &imports {
+        for name in &imp.named {
             let maxa = max_call_arity(src, name);
             call_arity.insert(name.clone(), maxa);
         }
+        if let Some(def) = &imp.default_name {
+            let maxa = max_call_arity(src, def);
+            call_arity.insert(def.clone(), maxa);
+        }
     }
 
-    for (pkg, names) in &imports {
-        if let Some(dts) = auto_host::read_pkg_dts(project_dir, pkg) {
-            for name in names {
+    for imp in &imports {
+        if let Some(dts) = auto_host::read_pkg_dts(project_dir, &imp.pkg) {
+            let mut all_names: Vec<String> = Vec::new();
+            all_names.extend(imp.named.iter().cloned());
+            if let Some(def) = &imp.default_name {
+                all_names.push(def.clone());
+            }
+
+            for name in &all_names {
                 if let Some(sig) = directives.sig_overrides.get(name) {
                     import_fns.push(format!("import fn {name}{}", sig));
                     continue;
@@ -117,8 +127,12 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
                 }
             }
         } else {
-            for name in names {
+            // No d.ts: default to i32; better than nothing.
+            for name in &imp.named {
                 import_fns.push(format!("import fn {name}(): i32"));
+            }
+            if let Some(def) = &imp.default_name {
+                import_fns.push(format!("import fn {def}(): i32"));
             }
         }
     }
@@ -131,6 +145,10 @@ fn auto_host_from_source(input_path: &PathBuf, src: &str) -> (String, Option<Pat
         }
         if trimmed.starts_with("import") && trimmed.contains("{") && trimmed.contains("}") {
             // e.g. import { nanoid } from "npm:nanoid"
+            continue;
+        }
+        if trimmed.starts_with("import") && trimmed.contains(" from ") {
+            // e.g. import nanoid from "npm:nanoid"
             continue;
         }
         rewritten.push_str(line);

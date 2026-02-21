@@ -18,7 +18,7 @@ export fn main(): i32 {
 wasmchi-cli run --target node main.wm
 ```
 
-を実行して、ソースに `import { ... } from "npm:<pkg>"` が含まれていると、runnerが裏で次をやる：
+を実行して、ソースに `import ... from "npm:<pkg>"` が含まれていると、runnerが裏で次をやる：
 
 1) `.wm` ファイルのディレクトリにローカルnpmプロジェクトを用意（`package.json`）
 2) **`bun install`** を実行（bun優先）して `node_modules` を作る
@@ -34,6 +34,16 @@ wasmchi-cli run --target node main.wm
   - 呼び出しが0引数なら0引数シグネチャを選ぶ
   - 呼び出しが1引数なら1引数シグネチャを選ぶ
   （呼び出し側の引数個数はかなり雑なスキャンで推定してる）
+
+## default import
+default import は **ベストエフォート**。
+
+```wasmchi
+import nanoid from "npm:nanoid"
+```
+
+`nanoid` みたいに default export を提供しないパッケージが多いので、今は namespace import して `mod.default ?? 最初のexport` を拾う方式。
+基本は named import 推奨。
 
 ## 上書き（ディレクティブ）
 コメントで推論を誘導できる：

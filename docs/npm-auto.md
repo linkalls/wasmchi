@@ -19,7 +19,7 @@ When you run:
 wasmchi-cli run --target node main.wm
 ```
 
-and the source contains `import { ... } from "npm:<pkg>"`, the runner will:
+and the source contains `import ... from "npm:<pkg>"`, the runner will:
 
 1) Ensure a local npm project exists in the `.wm` directory (`package.json`)
 2) Run **`bun install`** (preferred) to materialize `node_modules`
@@ -35,6 +35,16 @@ and the source contains `import { ... } from "npm:<pkg>"`, the runner will:
   - if you call it with 0 args, runner picks the 0-arg signature
   - if you call it with 1 arg, runner picks the 1-arg signature
   (call-site arity is inferred with a naive scan)
+
+## Default imports
+Default imports are **best-effort**.
+
+```wasmchi
+import nanoid from "npm:nanoid"
+```
+
+Many npm packages (like `nanoid`) do not provide a default export, so we currently fall back to a namespace import and pick `mod.default ?? first export`.
+Prefer named imports when possible.
 
 ## Overrides (directives)
 You can steer inference with comments:
