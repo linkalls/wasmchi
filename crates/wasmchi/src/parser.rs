@@ -118,6 +118,10 @@ impl Parser {
                 self.i += 1;
                 Ok(Type::Bool)
             }
+            lexer::TokenKind::Ident(s) if s == "jsobj" => {
+                self.i += 1;
+                Ok(Type::JsObj)
+            }
             _ => Err(self.err("expected type")),
         }
     }
@@ -277,62 +281,80 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
-        match &self.peek().kind {
+        let mut expr = match &self.peek().kind {
             lexer::TokenKind::Int(n) => {
                 let n = *n;
                 self.i += 1;
-                Ok(Expr::Int(n))
+                Expr::Int(n)
             }
             lexer::TokenKind::Float(bits) => {
                 let bits = *bits;
                 self.i += 1;
-                Ok(Expr::Float(bits))
+                Expr::Float(bits)
             }
             lexer::TokenKind::True => {
                 self.i += 1;
-                Ok(Expr::Bool(true))
+                Expr::Bool(true)
             }
             lexer::TokenKind::False => {
                 self.i += 1;
-                Ok(Expr::Bool(false))
+                Expr::Bool(false)
             }
             lexer::TokenKind::Str(s) => {
                 let s = s.clone();
                 self.i += 1;
-                Ok(Expr::Str(s))
+                Expr::Str(s)
             }
             lexer::TokenKind::Ident(s) => {
                 let name = s.clone();
                 self.i += 1;
-                if self.eat(lexer::TokenKind::LParen) {
-                    // call expr
-                    let mut args = Vec::new();
-                    self.skip_newlines();
-                    if !matches!(self.peek().kind, lexer::TokenKind::RParen) {
-                        loop {
-                            let arg = self.parse_expr()?;
-                            args.push(arg);
-                            if self.eat(lexer::TokenKind::Comma) {
-                                self.skip_newlines();
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    self.expect(lexer::TokenKind::RParen, ")")?;
-                    Ok(Expr::Call { callee: name, args })
-                } else {
-                    Ok(Expr::Var(name))
-                }
+                Expr::Var(name)
             }
             lexer::TokenKind::LParen => {
                 self.i += 1;
-                let expr = self.parse_expr()?;
+                let e = self.parse_expr()?;
                 self.expect(lexer::TokenKind::RParen, ")")?;
-                Ok(expr)
+                e
             }
-            _ => Err(self.err("expected expression")),
+            _ => return Err(self.err("expected expression")),
+        };
+
+        // postfix: `.prop` and calls `(...)`
+        loop {
+            if self.eat(lexer::TokenKind::Dot) {
+                let prop = self.expect_ident()?;
+                expr = Expr::Dot { base: Box::new(expr), prop };
+                continue;
+            }
+
+            if self.eat(lexer::TokenKind::LParen) {
+                let mut args = Vec::new();
+                self.skip_newlines();
+                if !matches!(self.peek().kind, lexer::TokenKind::RParen) {
+                    loop {
+                        let arg = self.parse_expr()?;
+                        args.push(arg);
+                        if self.eat(lexer::TokenKind::Comma) {
+                            self.skip_newlines();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(lexer::TokenKind::RParen, ")")?;
+
+                if let Expr::Var(name) = &expr {
+                    expr = Expr::Call { callee: name.clone(), args };
+                } else {
+                    expr = Expr::CallExpr { callee: Box::new(expr), args };
+                }
+                continue;
+            }
+
+            break;
         }
+
+        Ok(expr)
     }
 
     fn at_eof(&self) -> bool {

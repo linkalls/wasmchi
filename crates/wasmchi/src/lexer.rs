@@ -29,6 +29,7 @@ pub enum TokenKind {
     Equal,
     ColonEqual,
     Comma,
+    Dot,
     EqEq,
     BangEq,
     Lt,
@@ -125,6 +126,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                 }
             }
             b',' => { tokens.push(Token { kind: TokenKind::Comma, pos: i }); i += 1; }
+            b'.' => { tokens.push(Token { kind: TokenKind::Dot, pos: i }); i += 1; }
             _ => {
                 if b == b'"' {
                     let start = i;

@@ -38,6 +38,7 @@ pub enum Type {
     Bool,
     String,
     Void,
+    JsObj,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +58,14 @@ pub enum Expr {
     Bool(bool),
     Str(String),
     Var(String),
+
+    // Calls
     Call { callee: String, args: Vec<Expr> },
+    CallExpr { callee: Box<Expr>, args: Vec<Expr> },
+
+    // Property access
+    Dot { base: Box<Expr>, prop: String },
+
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
 }
 

@@ -19,6 +19,7 @@ fn import_meta_from_source(src: &str) -> String {
                     wasmchi::Type::F64 => "f64",
                     wasmchi::Type::Bool => "i32",
                     wasmchi::Type::String => "string",
+                    wasmchi::Type::JsObj => "jsobj",
                     wasmchi::Type::Void => "void",
                 })
                 .collect();
@@ -27,6 +28,7 @@ fn import_meta_from_source(src: &str) -> String {
                 wasmchi::Type::F64 => "f64",
                 wasmchi::Type::Bool => "i32",
                 wasmchi::Type::String => "string",
+                wasmchi::Type::JsObj => "jsobj",
                 wasmchi::Type::Void => "void",
             };
             items.push(format!(
@@ -599,7 +601,10 @@ function wrapUserEnv(userEnv) {{
   return wrapped;
 }}
 
-const env = {{ ...wrapUserEnv(userEnv), print }};
+const js_get = (_obj, _propPtr, _propLen) => 0;
+const js_call0 = (_fn, _thisObj) => 0;
+
+const env = {{ ...wrapUserEnv(userEnv), print, js_get, js_call0 }};
 
 const {{ instance }} = await WebAssembly.instantiate(wasmBytes, {{ env }});
 const memory = instance.exports.memory;
@@ -625,7 +630,10 @@ function print(ptr, len) {
   console.log(readString(ptr, len));
 }
 
-const { instance } = await WebAssembly.instantiate(wasmBytes, { env: { print } });
+const js_get = (_obj, _propPtr, _propLen) => 0;
+const js_call0 = (_fn, _thisObj) => 0;
+
+const { instance } = await WebAssembly.instantiate(wasmBytes, { env: { print, js_get, js_call0 } });
 const memory = instance.exports.memory;
 bytes = new Uint8Array(memory.buffer);
 decoder = new TextDecoder('utf-8');

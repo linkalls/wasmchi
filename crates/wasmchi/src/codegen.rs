@@ -23,6 +23,43 @@ pub enum CodegenError {
     PrintNonLiteral,
 }
 
+fn contains_js_interop(stmts: &[Stmt]) -> bool {
+    fn expr_has(e: &Expr) -> bool {
+        match e {
+            Expr::Dot { .. } | Expr::CallExpr { .. } => true,
+            Expr::Call { args, .. } => args.iter().any(expr_has),
+            Expr::Binary { left, right, .. } => expr_has(left) || expr_has(right),
+            _ => false,
+        }
+    }
+
+    for st in stmts {
+        match st {
+            Stmt::Let { expr, .. } | Stmt::Print(expr) | Stmt::Return(expr) | Stmt::Expr(expr) => {
+                if expr_has(expr) {
+                    return true;
+                }
+            }
+            Stmt::If { cond, then_body, else_body } => {
+                if expr_has(cond) || contains_js_interop(then_body) {
+                    return true;
+                }
+                if let Some(eb) = else_body {
+                    if contains_js_interop(eb) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::While { cond, body } => {
+                if expr_has(cond) || contains_js_interop(body) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 // Infer the Wasm value type of an expression given the current type environment.
 fn infer_val_type(
     expr: &Expr,
@@ -42,6 +79,8 @@ fn infer_val_type(
                 _ => ValType::I32,
             }
         }
+        Expr::Dot { .. } => ValType::I32,
+        Expr::CallExpr { .. } => ValType::I32,
         Expr::Binary { op, left, right } => match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 ValType::I32
@@ -128,6 +167,8 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         }
     }
 
+    let uses_js_interop = fns.iter().any(|(f, _)| contains_js_interop(&f.body));
+
     let Some(_) = fns.iter().find(|(f, _)| f.name == "main").copied() else {
         return Err(CodegenError::MissingMain);
     };
@@ -138,11 +179,12 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
             return Err(CodegenError::UnsupportedType);
         }
         for p in &imp.params {
-            if !matches!(p.ty, Type::I32 | Type::F64 | Type::String) {
+            if !matches!(p.ty, Type::I32 | Type::F64 | Type::String | Type::JsObj) {
                 return Err(CodegenError::UnsupportedType);
             }
         }
     }
+
     // Validate user-defined fn types: allow i32, f64, void, bool.
     for (f, _) in &fns {
         if !matches!(f.ret_ty, Type::I32 | Type::F64 | Type::Void | Type::Bool) {
@@ -163,6 +205,20 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     let print_ty = types.len();
     types.ty().function([ValType::I32, ValType::I32], []);
 
+    let mut js_get_ty: Option<u32> = None;
+    let mut js_call0_ty: Option<u32> = None;
+    if uses_js_interop {
+        // JS object interop primitives (host-provided)
+        // js_get(obj, prop_ptr, prop_len) -> jsobj
+        let idx = types.len();
+        types.ty().function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+        js_get_ty = Some(idx);
+        // js_call0(fn, this) -> jsobj
+        let idx = types.len();
+        types.ty().function([ValType::I32, ValType::I32], [ValType::I32]);
+        js_call0_ty = Some(idx);
+    }
+
     // type indices for imported fns
     let mut import_type_indices: Vec<u32> = Vec::new();
     for imp in &imports {
@@ -176,6 +232,7 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
                     lowered_params.push(ValType::I32);
                     lowered_params.push(ValType::I32);
                 }
+                Type::JsObj => lowered_params.push(ValType::I32),
                 _ => return Err(CodegenError::UnsupportedType),
             }
         }
@@ -221,10 +278,18 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
 
     // imports
     let mut import_section = ImportSection::new();
+    // imported functions (order matters for indices)
     import_section.import("env", "print", wasm_encoder::EntityType::Function(print_ty));
+    if uses_js_interop {
+        import_section.import("env", "js_get", wasm_encoder::EntityType::Function(js_get_ty.unwrap()));
+        import_section.import("env", "js_call0", wasm_encoder::EntityType::Function(js_call0_ty.unwrap()));
+    }
+
     for (imp, ty) in imports.iter().zip(import_type_indices.iter()) {
         import_section.import("env", &imp.name, wasm_encoder::EntityType::Function(*ty));
     }
+
+
     module.section(&import_section);
 
     // functions (defined)
@@ -262,7 +327,10 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
 
     // exports
     let mut exports = ExportSection::new();
-    let defined_base = 1 + imports.len() as u32;
+    // function index space:
+    // imported print=0, (optional) js_get=1, js_call0=2, then user imported fns, then defined fns
+    let imported_fn_base = if uses_js_interop { 3u32 } else { 1u32 };
+    let defined_base = imported_fn_base + imports.len() as u32;
     for (i, (f, is_export)) in fns.iter().enumerate() {
         if *is_export {
             exports.export(&f.name, ExportKind::Func, defined_base + i as u32);
@@ -285,14 +353,21 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     let mut import_rets = std::collections::HashMap::<String, Type>::new();
     let mut fn_rets = std::collections::HashMap::<String, Type>::new();
 
+    // builtin host interop funcs
+    if uses_js_interop {
+        fn_indices.insert("js_get".to_string(), 1);
+        fn_indices.insert("js_call0".to_string(), 2);
+    }
+
     // imported functions
+    let imported_fn_base = if uses_js_interop { 3u32 } else { 1u32 };
     for (i, imp) in imports.iter().enumerate() {
-        fn_indices.insert(imp.name.clone(), 1 + i as u32);
+        fn_indices.insert(imp.name.clone(), imported_fn_base + i as u32);
         import_sigs.insert(imp.name.clone(), imp.params.iter().map(|p| p.ty.clone()).collect());
         import_rets.insert(imp.name.clone(), imp.ret_ty.clone());
     }
     // defined functions
-    let defined_base = 1 + imports.len() as u32;
+    let defined_base = imported_fn_base + imports.len() as u32;
     for (i, (f, _)) in fns.iter().enumerate() {
         fn_indices.insert(f.name.clone(), defined_base + i as u32);
         fn_rets.insert(f.name.clone(), f.ret_ty.clone());
@@ -547,11 +622,13 @@ fn emit_expr(
         }
         Expr::Str(_) => Err(CodegenError::UnsupportedType),
         Expr::Var(name) => {
-            let Some((idx, _)) = locals.get(name) else {
-                return Err(CodegenError::UnknownVariable(name.clone()));
-            };
-            f.instruction(&Instruction::LocalGet(*idx));
-            Ok(())
+            if let Some((idx, _)) = locals.get(name) {
+                f.instruction(&Instruction::LocalGet(*idx));
+                return Ok(());
+            }
+            // imported values are globals appended after imported functions. We can't easily map indices here yet.
+            // v0: treat unknown var as error.
+            Err(CodegenError::UnknownVariable(name.clone()))
         }
         Expr::Call { callee, args } => {
             let Some(idx) = fn_indices.get(callee) else {
@@ -565,7 +642,7 @@ fn emit_expr(
                 }
                 for (arg, ty) in args.iter().zip(sig.iter()) {
                     match ty {
-                        Type::I32 => {
+                        Type::I32 | Type::Bool | Type::JsObj => {
                             emit_expr(f, arg, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
                         }
                         Type::F64 => {
@@ -599,6 +676,53 @@ fn emit_expr(
             }
 
             f.instruction(&Instruction::Call(*idx));
+            Ok(())
+        }
+
+        Expr::Dot { base, prop } => {
+            // base -> jsobj handle (i32)
+            emit_expr(f, base, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+
+            let bytes = prop.as_bytes();
+            let ptr = *next_data_offset;
+            let len = bytes.len() as u32;
+            *next_data_offset = next_data_offset.saturating_add(len);
+            let offset = ConstExpr::i32_const(ptr as i32);
+            data.active(0, &offset, bytes.iter().copied());
+            f.instruction(&Instruction::I32Const(ptr as i32));
+            f.instruction(&Instruction::I32Const(len as i32));
+
+            // call env.js_get (index 1)
+            f.instruction(&Instruction::Call(1));
+            Ok(())
+        }
+
+        Expr::CallExpr { callee, args } => {
+            // v0: only support method call with 0 args: `obj.prop()`
+            if !args.is_empty() {
+                return Err(CodegenError::UnsupportedType);
+            }
+            let Expr::Dot { base, prop } = callee.as_ref() else {
+                return Err(CodegenError::UnsupportedType);
+            };
+
+            // js_get(base, prop) -> fn
+            emit_expr(f, base, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+            let bytes = prop.as_bytes();
+            let ptr = *next_data_offset;
+            let len = bytes.len() as u32;
+            *next_data_offset = next_data_offset.saturating_add(len);
+            let offset = ConstExpr::i32_const(ptr as i32);
+            data.active(0, &offset, bytes.iter().copied());
+            f.instruction(&Instruction::I32Const(ptr as i32));
+            f.instruction(&Instruction::I32Const(len as i32));
+            f.instruction(&Instruction::Call(1));
+
+            // push this
+            emit_expr(f, base, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+
+            // js_call0(fn, this)
+            f.instruction(&Instruction::Call(2));
             Ok(())
         }
         Expr::Binary { op, left, right } => {
