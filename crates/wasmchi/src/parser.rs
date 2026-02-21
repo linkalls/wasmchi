@@ -3,24 +3,27 @@ use thiserror::Error;
 use crate::{ast::*, lexer};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[error("parse error at {pos}: {message}")]
+#[error("parse error at line {line}, col {col}: {message}")]
 pub struct ParseError {
     pub pos: usize,
+    pub line: usize,
+    pub col: usize,
     pub message: String,
 }
 
 pub fn parse_program(source: &str) -> Result<Program, ParseError> {
     let tokens = lexer::lex(source);
-    let mut p = Parser { tokens, i: 0 };
+    let mut p = Parser { tokens, i: 0, source };
     p.parse_program()
 }
 
-struct Parser {
+struct Parser<'a> {
     tokens: Vec<lexer::Token>,
     i: usize,
+    source: &'a str,
 }
 
-impl Parser {
+impl<'a> Parser<'a> {
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         self.skip_newlines();
         let mut items = Vec::new();
@@ -173,11 +176,18 @@ impl Parser {
                 let then_body = self.parse_block_stmts()?;
                 self.expect(lexer::TokenKind::RBrace, "}")?;
                 let else_body = if self.eat(lexer::TokenKind::Else) {
-                    self.expect(lexer::TokenKind::LBrace, "{")?;
                     self.skip_newlines();
-                    let body = self.parse_block_stmts()?;
-                    self.expect(lexer::TokenKind::RBrace, "}")?;
-                    Some(body)
+                    // Support `else if` without braces around the inner if.
+                    if matches!(self.peek().kind, lexer::TokenKind::If) {
+                        let if_stmt = self.parse_stmt()?;
+                        Some(vec![if_stmt])
+                    } else {
+                        self.expect(lexer::TokenKind::LBrace, "{")?;
+                        self.skip_newlines();
+                        let body = self.parse_block_stmts()?;
+                        self.expect(lexer::TokenKind::RBrace, "}")?;
+                        Some(body)
+                    }
                 } else {
                     None
                 };
@@ -223,7 +233,27 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_compare()
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_and()?;
+        while matches!(self.peek().kind, lexer::TokenKind::PipePipe) {
+            self.i += 1;
+            let right = self.parse_and()?;
+            expr = Expr::Binary { op: BinOp::Or, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_and(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_compare()?;
+        while matches!(self.peek().kind, lexer::TokenKind::AmpAmp) {
+            self.i += 1;
+            let right = self.parse_compare()?;
+            expr = Expr::Binary { op: BinOp::And, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
     }
 
     fn parse_compare(&mut self) -> Result<Expr, ParseError> {
@@ -266,7 +296,7 @@ impl Parser {
     }
 
     fn parse_mul_div(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_primary()?;
+        let mut expr = self.parse_unary()?;
         loop {
             let op = match self.peek().kind {
                 lexer::TokenKind::Star => BinOp::Mul,
@@ -274,10 +304,19 @@ impl Parser {
                 _ => break,
             };
             self.i += 1;
-            let right = self.parse_primary()?;
+            let right = self.parse_unary()?;
             expr = Expr::Binary { op, left: Box::new(expr), right: Box::new(right) };
         }
         Ok(expr)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek().kind, lexer::TokenKind::Bang) {
+            self.i += 1;
+            let e = self.parse_unary()?;
+            return Ok(Expr::Not(Box::new(e)));
+        }
+        self.parse_primary()
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -436,6 +475,25 @@ impl Parser {
     }
 
     fn err(&self, message: impl Into<String>) -> ParseError {
-        ParseError { pos: self.peek().pos, message: message.into() }
+        let pos = self.peek().pos;
+        let (line, col) = self.line_col(pos);
+        ParseError { pos, line, col, message: message.into() }
+    }
+
+    fn line_col(&self, pos: usize) -> (usize, usize) {
+        let mut line = 1usize;
+        let mut col = 1usize;
+        for (i, b) in self.source.bytes().enumerate() {
+            if i == pos {
+                break;
+            }
+            if b == b'\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
     }
 }

@@ -81,8 +81,10 @@ fn infer_val_type(
         }
         Expr::Dot { .. } => ValType::I32,
         Expr::CallExpr { .. } => ValType::I32,
+        Expr::Not(_) => ValType::I32,
         Expr::Binary { op, left, right } => match op {
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            | BinOp::And | BinOp::Or => {
                 ValType::I32
             }
             _ => {
@@ -132,7 +134,57 @@ fn collect_unique_lets(
     }
 }
 
-// Check whether any path in stmts contains a return statement.
+// Recursively count the total bytes of string data the program will write to the
+// data section: string literals used as print/call arguments + dot property names.
+fn count_string_data_expr(expr: &Expr) -> u32 {
+    match expr {
+        Expr::Str(s) => s.len() as u32,
+        Expr::Call { args, .. } => args.iter().map(count_string_data_expr).sum(),
+        Expr::Dot { base, prop } => count_string_data_expr(base) + prop.len() as u32,
+        Expr::CallExpr { callee, args } => {
+            count_string_data_expr(callee) + args.iter().map(count_string_data_expr).sum::<u32>()
+        }
+        Expr::Binary { left, right, .. } => {
+            count_string_data_expr(left) + count_string_data_expr(right)
+        }
+        Expr::Not(e) => count_string_data_expr(e),
+        _ => 0,
+    }
+}
+
+fn count_string_data_stmts(stmts: &[Stmt]) -> u32 {
+    stmts.iter().map(|s| match s {
+        Stmt::Let { expr, .. } | Stmt::Return(expr) | Stmt::Expr(expr) | Stmt::Print(expr) => {
+            count_string_data_expr(expr)
+        }
+        Stmt::If { cond, then_body, else_body } => {
+            count_string_data_expr(cond)
+                + count_string_data_stmts(then_body)
+                + else_body.as_deref().map_or(0, count_string_data_stmts)
+        }
+        Stmt::While { cond, body } => {
+            count_string_data_expr(cond) + count_string_data_stmts(body)
+        }
+    }).sum()
+}
+
+/// Alignment (in bytes) used for the bump allocator's heap.
+const HEAP_ALIGNMENT: u32 = 8;
+
+/// Minimum heap base: keeps address 0 (and a small region around it) free from
+/// allocations to avoid null-pointer confusion.
+const MIN_HEAP_BASE: u32 = 64;
+
+fn calc_heap_base(program: &Program) -> u32 {
+    let total: u32 = program.items.iter().map(|item| match item {
+        Item::ExportFn(f) | Item::Fn(f) => count_string_data_stmts(&f.body),
+        _ => 0,
+    }).sum();
+    // Round up to HEAP_ALIGNMENT; enforce MIN_HEAP_BASE to avoid null-ptr territory.
+    let aligned = (total + HEAP_ALIGNMENT - 1) & !(HEAP_ALIGNMENT - 1);
+    aligned.max(MIN_HEAP_BASE)
+}
+
 fn has_any_return(stmts: &[Stmt]) -> bool {
     for s in stmts {
         match s {
@@ -154,6 +206,22 @@ fn has_any_return(stmts: &[Stmt]) -> bool {
     }
     false
 }
+
+// Check whether every execution path through stmts terminates with a return.
+fn all_paths_return(stmts: &[Stmt]) -> bool {
+    match stmts.last() {
+        Some(Stmt::Return(_)) => true,
+        Some(Stmt::If { then_body, else_body, .. }) => {
+            if let Some(eb) = else_body {
+                all_paths_return(then_body) && all_paths_return(eb)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 
 pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     // Collect imports + functions in source order.
@@ -313,7 +381,8 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     });
     module.section(&memories);
 
-    // globals: heap pointer for __alloc
+    // globals: heap pointer for __alloc, initialized after all string data
+    let heap_base = calc_heap_base(program);
     let mut globals = GlobalSection::new();
     globals.global(
         GlobalType {
@@ -321,7 +390,7 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
             mutable: true,
             shared: false,
         },
-        &ConstExpr::i32_const(4096),
+        &ConstExpr::i32_const(heap_base as i32),
     );
     module.section(&globals);
 
@@ -488,6 +557,13 @@ fn build_wasm_function(
         data,
         next_data_offset,
     )?;
+
+    // When every path through the body already returns, the code after emit_stmts
+    // is unreachable.  Emit `unreachable` so the Wasm type-checker is satisfied
+    // (it cannot statically see that all paths returned).
+    if fndef.ret_ty != Type::Void && all_paths_return(&fndef.body) {
+        f.instruction(&Instruction::Unreachable);
+    }
 
     f.instruction(&Instruction::End);
     Ok(f)
@@ -725,7 +801,37 @@ fn emit_expr(
             f.instruction(&Instruction::Call(2));
             Ok(())
         }
+        Expr::Not(inner) => {
+            emit_expr(f, inner, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+            f.instruction(&Instruction::I32Eqz);
+            Ok(())
+        }
         Expr::Binary { op, left, right } => {
+            // Short-circuit logical operators use Wasm `if` blocks.
+            match op {
+                BinOp::And => {
+                    // a && b  ->  if a { b } else { 0 }
+                    emit_expr(f, left, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                    f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                    emit_expr(f, right, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                    f.instruction(&Instruction::Else);
+                    f.instruction(&Instruction::I32Const(0));
+                    f.instruction(&Instruction::End);
+                    return Ok(());
+                }
+                BinOp::Or => {
+                    // a || b  ->  if a { 1 } else { b }
+                    emit_expr(f, left, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                    f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                    f.instruction(&Instruction::I32Const(1));
+                    f.instruction(&Instruction::Else);
+                    emit_expr(f, right, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                    f.instruction(&Instruction::End);
+                    return Ok(());
+                }
+                _ => {}
+            }
+
             let lt = infer_val_type(left, locals, import_rets, fn_rets);
             let rt = infer_val_type(right, locals, import_rets, fn_rets);
             let use_f64 = lt == ValType::F64 || rt == ValType::F64;
@@ -771,9 +877,10 @@ fn emit_expr(
                 BinOp::Ge => {
                     if use_f64 { f.instruction(&Instruction::F64Ge); } else { f.instruction(&Instruction::I32GeS); }
                 }
+                // Already handled above; unreachable here.
+                BinOp::And | BinOp::Or => unreachable!(),
             }
             Ok(())
         }
     }
 }
-

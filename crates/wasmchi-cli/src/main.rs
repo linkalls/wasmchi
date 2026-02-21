@@ -394,6 +394,9 @@ fn main() {
                 }
             }
         }
+        "doctor" => {
+            run_doctor();
+        }
         _ => usage_and_exit(),
     }
 }
@@ -643,9 +646,26 @@ console.log(ret);
 "#
 }
 
+fn run_doctor() {
+    fn check_tool(name: &str, version_arg: &str) {
+        match std::process::Command::new(name).arg(version_arg).output() {
+            Ok(out) if out.status.success() => {
+                let ver = String::from_utf8_lossy(&out.stdout);
+                let ver = ver.trim();
+                println!("[✓] {name} ({ver})");
+            }
+            Ok(_) => println!("[✗] {name} (returned error)"),
+            Err(_) => println!("[✗] {name} (not found)"),
+        }
+    }
+    println!("wasmchi doctor — checking dependencies");
+    check_tool("node", "--version");
+    check_tool("bun", "--version");
+}
+
 fn usage_and_exit() {
     eprintln!(
-        "wasmchi (wip)\n\nUSAGE:\n  wasmchi build <file.wm> [--out <out.wasm>]\n  wasmchi run [--target node|browser] <file.wm>\n  wasmchi bundle --target browser <file.wm> [--out-dir <dir>]\n",
+        "wasmchi (wip)\n\nUSAGE:\n  wasmchi build <file.wm> [--out <out.wasm>]\n  wasmchi run [--target node|browser] <file.wm>\n  wasmchi bundle --target browser <file.wm> [--out-dir <dir>]\n  wasmchi doctor\n",
     );
     process::exit(2);
 }
