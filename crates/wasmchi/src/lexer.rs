@@ -64,7 +64,18 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'+' => { tokens.push(Token { kind: TokenKind::Plus, pos: i }); i += 1; }
             b'-' => { tokens.push(Token { kind: TokenKind::Minus, pos: i }); i += 1; }
             b'*' => { tokens.push(Token { kind: TokenKind::Star, pos: i }); i += 1; }
-            b'/' => { tokens.push(Token { kind: TokenKind::Slash, pos: i }); i += 1; }
+            b'/' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    // line comment
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                } else {
+                    tokens.push(Token { kind: TokenKind::Slash, pos: i });
+                    i += 1;
+                }
+            }
             b'=' => { tokens.push(Token { kind: TokenKind::Equal, pos: i }); i += 1; }
             b',' => { tokens.push(Token { kind: TokenKind::Comma, pos: i }); i += 1; }
             _ => {
