@@ -1,9 +1,9 @@
 use thiserror::Error;
 
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, Function as WasmFunction,
-    FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction, MemorySection,
-    MemoryType, Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ExportKind, ExportSection,
+    Function as WasmFunction, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    Instruction, MemorySection, MemoryType, Module, TypeSection, ValType,
 };
 
 use crate::ast::{BinOp, Expr, ImportFn, Item, Program, Stmt, Type};
@@ -13,14 +13,107 @@ use crate::ast::Function as AstFunction;
 pub enum CodegenError {
     #[error("missing export fn main")]
     MissingMain,
-    #[error("unsupported type or feature in v0")]
+    #[error("unsupported type or feature")]
     UnsupportedType,
     #[error("function body must end in return")]
     MissingReturn,
     #[error("unknown variable: {0}")]
     UnknownVariable(String),
-    #[error("print only supports string literal in v0")]
+    #[error("print only supports string literal")]
     PrintNonLiteral,
+}
+
+// Infer the Wasm value type of an expression given the current type environment.
+fn infer_val_type(
+    expr: &Expr,
+    locals: &std::collections::HashMap<String, (u32, ValType)>,
+    import_rets: &std::collections::HashMap<String, Type>,
+    fn_rets: &std::collections::HashMap<String, Type>,
+) -> ValType {
+    match expr {
+        Expr::Int(_) | Expr::Bool(_) => ValType::I32,
+        Expr::Float(_) => ValType::F64,
+        Expr::Str(_) => ValType::I32,
+        Expr::Var(name) => locals.get(name).map(|(_, vt)| *vt).unwrap_or(ValType::I32),
+        Expr::Call { callee, .. } => {
+            let ty = import_rets.get(callee).or_else(|| fn_rets.get(callee));
+            match ty {
+                Some(Type::F64) => ValType::F64,
+                _ => ValType::I32,
+            }
+        }
+        Expr::Binary { op, left, right } => match op {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                ValType::I32
+            }
+            _ => {
+                let l = infer_val_type(left, locals, import_rets, fn_rets);
+                let r = infer_val_type(right, locals, import_rets, fn_rets);
+                if l == ValType::F64 || r == ValType::F64 {
+                    ValType::F64
+                } else {
+                    ValType::I32
+                }
+            }
+        },
+    }
+}
+
+// Recursively collect unique let bindings (name, inferred ValType) in order of first occurrence.
+fn collect_unique_lets(
+    stmts: &[Stmt],
+    locals: &mut std::collections::HashMap<String, (u32, ValType)>,
+    import_rets: &std::collections::HashMap<String, Type>,
+    fn_rets: &std::collections::HashMap<String, Type>,
+    result: &mut Vec<(String, ValType)>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, expr } => {
+                if !seen.contains(name) {
+                    let vt = infer_val_type(expr, locals, import_rets, fn_rets);
+                    seen.insert(name.clone());
+                    result.push((name.clone(), vt));
+                    // placeholder index 0 for now; will be fixed after full collection
+                    locals.insert(name.clone(), (0, vt));
+                }
+            }
+            Stmt::If { then_body, else_body, .. } => {
+                collect_unique_lets(then_body, locals, import_rets, fn_rets, result, seen);
+                if let Some(eb) = else_body {
+                    collect_unique_lets(eb, locals, import_rets, fn_rets, result, seen);
+                }
+            }
+            Stmt::While { body, .. } => {
+                collect_unique_lets(body, locals, import_rets, fn_rets, result, seen);
+            }
+            _ => {}
+        }
+    }
+}
+
+// Check whether any path in stmts contains a return statement.
+fn has_any_return(stmts: &[Stmt]) -> bool {
+    for s in stmts {
+        match s {
+            Stmt::Return(_) => return true,
+            Stmt::If { then_body, else_body, .. } => {
+                if has_any_return(then_body)
+                    || else_body.as_deref().map_or(false, has_any_return)
+                {
+                    return true;
+                }
+            }
+            Stmt::While { body, .. } => {
+                if has_any_return(body) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
@@ -35,16 +128,11 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         }
     }
 
-    let Some((main, _)) = fns.iter().find(|(f, _)| f.name == "main").copied() else {
+    let Some(_) = fns.iter().find(|(f, _)| f.name == "main").copied() else {
         return Err(CodegenError::MissingMain);
     };
 
-    if main.ret_ty != Type::I32 {
-        return Err(CodegenError::UnsupportedType);
-    }
-
-    // v0: user functions are i32-only for now.
-    // imports: allow i32/f64 + string params and i32/f64/void/string returns.
+    // Validate imported fn types.
     for imp in &imports {
         if !matches!(imp.ret_ty, Type::I32 | Type::F64 | Type::Void | Type::String) {
             return Err(CodegenError::UnsupportedType);
@@ -55,12 +143,13 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
             }
         }
     }
+    // Validate user-defined fn types: allow i32, f64, void, bool.
     for (f, _) in &fns {
-        if f.ret_ty != Type::I32 {
+        if !matches!(f.ret_ty, Type::I32 | Type::F64 | Type::Void | Type::Bool) {
             return Err(CodegenError::UnsupportedType);
         }
         for p in &f.params {
-            if p.ty != Type::I32 {
+            if !matches!(p.ty, Type::I32 | Type::F64 | Type::Bool) {
                 return Err(CodegenError::UnsupportedType);
             }
         }
@@ -78,7 +167,6 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     let mut import_type_indices: Vec<u32> = Vec::new();
     for imp in &imports {
         let idx = types.len();
-        // string params lower to (i32,i32)
         let mut lowered_params: Vec<ValType> = Vec::new();
         for p in &imp.params {
             match p.ty {
@@ -96,17 +184,32 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
             Type::F64 => vec![ValType::F64],
             Type::Void => vec![],
             Type::String => vec![ValType::I32, ValType::I32],
+            _ => return Err(CodegenError::UnsupportedType),
         };
         types.ty().function(lowered_params, results);
         import_type_indices.push(idx);
     }
 
-    // function types for user fns
+    // function types for user fns (now supports f64/void/bool)
     let mut fn_type_indices: Vec<u32> = Vec::new();
     for (f, _) in &fns {
         let idx = types.len();
-        let params = std::iter::repeat(ValType::I32).take(f.params.len());
-        types.ty().function(params, [ValType::I32]);
+        let params: Vec<ValType> = f
+            .params
+            .iter()
+            .map(|p| match p.ty {
+                Type::I32 | Type::Bool => ValType::I32,
+                Type::F64 => ValType::F64,
+                _ => unreachable!(),
+            })
+            .collect();
+        let results: Vec<ValType> = match f.ret_ty {
+            Type::I32 | Type::Bool => vec![ValType::I32],
+            Type::F64 => vec![ValType::F64],
+            Type::Void => vec![],
+            _ => unreachable!(),
+        };
+        types.ty().function(params, results);
         fn_type_indices.push(idx);
     }
 
@@ -146,7 +249,6 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     module.section(&memories);
 
     // globals: heap pointer for __alloc
-    // v0: start at a fixed offset to avoid overlapping data segments
     let mut globals = GlobalSection::new();
     globals.global(
         GlobalType {
@@ -160,7 +262,6 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
 
     // exports
     let mut exports = ExportSection::new();
-    // function index space: imported print=0, then imported fns, then defined fns
     let defined_base = 1 + imports.len() as u32;
     for (i, (f, is_export)) in fns.iter().enumerate() {
         if *is_export {
@@ -182,6 +283,7 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     // name -> signature (for imports, needed to lower args)
     let mut import_sigs = std::collections::HashMap::<String, Vec<Type>>::new();
     let mut import_rets = std::collections::HashMap::<String, Type>::new();
+    let mut fn_rets = std::collections::HashMap::<String, Type>::new();
 
     // imported functions
     for (i, imp) in imports.iter().enumerate() {
@@ -193,115 +295,23 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     let defined_base = 1 + imports.len() as u32;
     for (i, (f, _)) in fns.iter().enumerate() {
         fn_indices.insert(f.name.clone(), defined_base + i as u32);
+        fn_rets.insert(f.name.clone(), f.ret_ty.clone());
     }
 
     // code
     let mut codes = CodeSection::new();
 
-    for (_func_i, (fndef, _)) in fns.iter().enumerate() {
-        let local_count = fndef
-            .body
-            .iter()
-            .filter(|s| matches!(s, Stmt::Let { .. }))
-            .count() as u32;
-
-        let mut f = WasmFunction::new([(local_count, ValType::I32)]);
-
-        let mut locals = std::collections::HashMap::<String, u32>::new();
-        // params first
-        for (pi, p) in fndef.params.iter().enumerate() {
-            locals.insert(p.name.clone(), pi as u32);
-        }
-        let mut next_local: u32 = fndef.params.len() as u32;
-
-        let mut did_return = false;
-
-        for stmt in &fndef.body {
-            match stmt {
-                Stmt::Let { name, expr } => {
-                    let local_idx = next_local;
-                    next_local += 1;
-                    locals.insert(name.clone(), local_idx);
-                    emit_expr(&mut f, expr, &locals, &fn_indices, &import_sigs, &mut data, &mut next_data_offset)?;
-                    f.instruction(&Instruction::LocalSet(local_idx));
-                }
-                Stmt::Print(expr) => {
-                    match expr {
-                        Expr::Str(s) => {
-                            let bytes = s.as_bytes();
-                            let ptr = next_data_offset;
-                            let len = bytes.len() as u32;
-                            next_data_offset = next_data_offset.saturating_add(len);
-
-                            let offset = ConstExpr::i32_const(ptr as i32);
-                            data.active(0, &offset, bytes.iter().copied());
-
-                            f.instruction(&Instruction::I32Const(ptr as i32));
-                            f.instruction(&Instruction::I32Const(len as i32));
-                            f.instruction(&Instruction::Call(0));
-                        }
-                        Expr::Call { callee, .. } => {
-                            // allow printing the result of a string-returning import.
-                            if !matches!(import_rets.get(callee), Some(Type::String)) {
-                                return Err(CodegenError::PrintNonLiteral);
-                            }
-                            emit_expr(
-                                &mut f,
-                                expr,
-                                &locals,
-                                &fn_indices,
-                                &import_sigs,
-                                &mut data,
-                                &mut next_data_offset,
-                            )?;
-                            // stack has (ptr,len)
-                            f.instruction(&Instruction::Call(0));
-                        }
-                        _ => return Err(CodegenError::PrintNonLiteral),
-                    }
-                }
-                Stmt::Return(expr) => {
-                    emit_expr(&mut f, expr, &locals, &fn_indices, &import_sigs, &mut data, &mut next_data_offset)?;
-                    f.instruction(&Instruction::End);
-                    did_return = true;
-                    break;
-                }
-                Stmt::Expr(expr) => {
-                    // If this is a void-returning import call, don't drop.
-                    if let Expr::Call { callee, .. } = expr {
-                        if let Some(Type::Void) = import_rets.get(callee) {
-                            emit_expr(
-                                &mut f,
-                                expr,
-                                &locals,
-                                &fn_indices,
-                                &import_sigs,
-                                &mut data,
-                                &mut next_data_offset,
-                            )?;
-                            continue;
-                        }
-                    }
-
-                    emit_expr(
-                        &mut f,
-                        expr,
-                        &locals,
-                        &fn_indices,
-                        &import_sigs,
-                        &mut data,
-                        &mut next_data_offset,
-                    )?;
-                    f.instruction(&Instruction::Drop);
-                }
-            }
-        }
-
-        if !did_return {
-            return Err(CodegenError::MissingReturn);
-        }
-
-        codes.function(&f);
+    for (fndef, _) in &fns {
+        let wasm_f = build_wasm_function(
+            fndef,
+            &fn_indices,
+            &import_sigs,
+            &import_rets,
+            &fn_rets,
+            &mut data,
+            &mut next_data_offset,
+        )?;
+        codes.function(&wasm_f);
     }
 
     // allocator code (last defined fn)
@@ -322,12 +332,203 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     Ok(module.finish())
 }
 
+fn build_wasm_function(
+    fndef: &AstFunction,
+    fn_indices: &std::collections::HashMap<String, u32>,
+    import_sigs: &std::collections::HashMap<String, Vec<Type>>,
+    import_rets: &std::collections::HashMap<String, Type>,
+    fn_rets: &std::collections::HashMap<String, Type>,
+    data: &mut DataSection,
+    next_data_offset: &mut u32,
+) -> Result<WasmFunction, CodegenError> {
+    // Build initial locals map from parameters.
+    let mut locals = std::collections::HashMap::<String, (u32, ValType)>::new();
+    for (i, p) in fndef.params.iter().enumerate() {
+        let vt = match p.ty {
+            Type::I32 | Type::Bool => ValType::I32,
+            Type::F64 => ValType::F64,
+            _ => unreachable!(),
+        };
+        locals.insert(p.name.clone(), (i as u32, vt));
+    }
+
+    // Collect all unique let bindings with inferred types.
+    let mut let_bindings: Vec<(String, ValType)> = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    collect_unique_lets(
+        &fndef.body,
+        &mut locals,
+        import_rets,
+        fn_rets,
+        &mut let_bindings,
+        &mut seen,
+    );
+
+    // Assign local indices: i32 locals first, then f64 locals (after params).
+    let n_params = fndef.params.len() as u32;
+    let i32_lets: Vec<&str> = let_bindings
+        .iter()
+        .filter(|(_, vt)| *vt == ValType::I32)
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let f64_lets: Vec<&str> = let_bindings
+        .iter()
+        .filter(|(_, vt)| *vt == ValType::F64)
+        .map(|(n, _)| n.as_str())
+        .collect();
+
+    let i32_base = n_params;
+    let f64_base = n_params + i32_lets.len() as u32;
+
+    for (i, name) in i32_lets.iter().enumerate() {
+        locals.insert(name.to_string(), (i32_base + i as u32, ValType::I32));
+    }
+    for (i, name) in f64_lets.iter().enumerate() {
+        locals.insert(name.to_string(), (f64_base + i as u32, ValType::F64));
+    }
+
+    // Build WasmFunction with declared locals.
+    let mut wasm_local_decls: Vec<(u32, ValType)> = Vec::new();
+    if !i32_lets.is_empty() {
+        wasm_local_decls.push((i32_lets.len() as u32, ValType::I32));
+    }
+    if !f64_lets.is_empty() {
+        wasm_local_decls.push((f64_lets.len() as u32, ValType::F64));
+    }
+    let mut f = WasmFunction::new(wasm_local_decls);
+
+    // Check that non-void functions have at least one return path.
+    if fndef.ret_ty != Type::Void && !has_any_return(&fndef.body) {
+        return Err(CodegenError::MissingReturn);
+    }
+
+    emit_stmts(
+        &mut f,
+        &fndef.body,
+        &locals,
+        fn_indices,
+        import_sigs,
+        import_rets,
+        fn_rets,
+        data,
+        next_data_offset,
+    )?;
+
+    f.instruction(&Instruction::End);
+    Ok(f)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_stmts(
+    f: &mut WasmFunction,
+    stmts: &[Stmt],
+    locals: &std::collections::HashMap<String, (u32, ValType)>,
+    fn_indices: &std::collections::HashMap<String, u32>,
+    import_sigs: &std::collections::HashMap<String, Vec<Type>>,
+    import_rets: &std::collections::HashMap<String, Type>,
+    fn_rets: &std::collections::HashMap<String, Type>,
+    data: &mut DataSection,
+    next_data_offset: &mut u32,
+) -> Result<(), CodegenError> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, expr } => {
+                let (local_idx, _) = *locals
+                    .get(name)
+                    .ok_or_else(|| CodegenError::UnknownVariable(name.clone()))?;
+                emit_expr(f, expr, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                f.instruction(&Instruction::LocalSet(local_idx));
+            }
+            Stmt::Print(expr) => {
+                match expr {
+                    Expr::Str(s) => {
+                        let bytes = s.as_bytes();
+                        let ptr = *next_data_offset;
+                        let len = bytes.len() as u32;
+                        *next_data_offset = next_data_offset.saturating_add(len);
+                        let offset = ConstExpr::i32_const(ptr as i32);
+                        data.active(0, &offset, bytes.iter().copied());
+                        f.instruction(&Instruction::I32Const(ptr as i32));
+                        f.instruction(&Instruction::I32Const(len as i32));
+                        f.instruction(&Instruction::Call(0));
+                    }
+                    Expr::Call { callee, .. } => {
+                        // allow printing the result of a string-returning import.
+                        if !matches!(import_rets.get(callee), Some(Type::String)) {
+                            return Err(CodegenError::PrintNonLiteral);
+                        }
+                        emit_expr(f, expr, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                        // stack has (ptr,len)
+                        f.instruction(&Instruction::Call(0));
+                    }
+                    _ => return Err(CodegenError::PrintNonLiteral),
+                }
+            }
+            Stmt::Return(expr) => {
+                emit_expr(f, expr, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                f.instruction(&Instruction::Return);
+            }
+            Stmt::Expr(expr) => {
+                // Determine how many values the expression leaves on the stack.
+                let n_results = if let Expr::Call { callee, .. } = expr {
+                    let ret_ty =
+                        import_rets.get(callee).or_else(|| fn_rets.get(callee));
+                    match ret_ty {
+                        Some(Type::Void) => 0usize,
+                        Some(Type::String) => 2,
+                        _ => 1,
+                    }
+                } else {
+                    1
+                };
+                emit_expr(f, expr, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                for _ in 0..n_results {
+                    f.instruction(&Instruction::Drop);
+                }
+            }
+            Stmt::If { cond, then_body, else_body } => {
+                emit_expr(f, cond, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                f.instruction(&Instruction::If(BlockType::Empty));
+                emit_stmts(f, then_body, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                if let Some(eb) = else_body {
+                    f.instruction(&Instruction::Else);
+                    emit_stmts(f, eb, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                }
+                f.instruction(&Instruction::End);
+            }
+            Stmt::While { cond, body } => {
+                // block $exit
+                //   loop $repeat
+                //     <cond>
+                //     i32.eqz
+                //     br_if $exit  (label 1 = outer block)
+                //     <body>
+                //     br $repeat   (label 0 = loop)
+                //   end
+                // end
+                f.instruction(&Instruction::Block(BlockType::Empty));
+                f.instruction(&Instruction::Loop(BlockType::Empty));
+                emit_expr(f, cond, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::BrIf(1));
+                emit_stmts(f, body, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                f.instruction(&Instruction::Br(0));
+                f.instruction(&Instruction::End); // end loop
+                f.instruction(&Instruction::End); // end block
+            }
+        }
+    }
+    Ok(())
+}
+
 fn emit_expr(
     f: &mut WasmFunction,
     expr: &Expr,
-    locals: &std::collections::HashMap<String, u32>,
+    locals: &std::collections::HashMap<String, (u32, ValType)>,
     fn_indices: &std::collections::HashMap<String, u32>,
     import_sigs: &std::collections::HashMap<String, Vec<Type>>,
+    import_rets: &std::collections::HashMap<String, Type>,
+    fn_rets: &std::collections::HashMap<String, Type>,
     data: &mut DataSection,
     next_data_offset: &mut u32,
 ) -> Result<(), CodegenError> {
@@ -336,9 +537,17 @@ fn emit_expr(
             f.instruction(&Instruction::I32Const(*n));
             Ok(())
         }
+        Expr::Float(bits) => {
+            f.instruction(&Instruction::F64Const(f64::from_bits(*bits).into()));
+            Ok(())
+        }
+        Expr::Bool(b) => {
+            f.instruction(&Instruction::I32Const(if *b { 1 } else { 0 }));
+            Ok(())
+        }
         Expr::Str(_) => Err(CodegenError::UnsupportedType),
         Expr::Var(name) => {
-            let Some(idx) = locals.get(name) else {
+            let Some((idx, _)) = locals.get(name) else {
                 return Err(CodegenError::UnknownVariable(name.clone()));
             };
             f.instruction(&Instruction::LocalGet(*idx));
@@ -357,16 +566,13 @@ fn emit_expr(
                 for (arg, ty) in args.iter().zip(sig.iter()) {
                     match ty {
                         Type::I32 => {
-                            emit_expr(f, arg, locals, fn_indices, import_sigs, data, next_data_offset)?;
+                            emit_expr(f, arg, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
                         }
                         Type::F64 => {
-                            // v0: allow int literal -> f64 conversion for JS number interop.
-                            match arg {
-                                Expr::Int(n) => {
-                                    f.instruction(&Instruction::I32Const(*n));
-                                    f.instruction(&Instruction::F64ConvertI32S);
-                                }
-                                _ => return Err(CodegenError::UnsupportedType),
+                            let arg_vt = infer_val_type(arg, locals, import_rets, fn_rets);
+                            emit_expr(f, arg, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+                            if arg_vt == ValType::I32 {
+                                f.instruction(&Instruction::F64ConvertI32S);
                             }
                         }
                         Type::String => {
@@ -386,9 +592,9 @@ fn emit_expr(
                     }
                 }
             } else {
-                // Defined functions: i32-only for now
+                // Defined functions: pass args with type coercion.
                 for a in args {
-                    emit_expr(f, a, locals, fn_indices, import_sigs, data, next_data_offset)?;
+                    emit_expr(f, a, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
                 }
             }
 
@@ -396,15 +602,54 @@ fn emit_expr(
             Ok(())
         }
         Expr::Binary { op, left, right } => {
-            emit_expr(f, left, locals, fn_indices, import_sigs, data, next_data_offset)?;
-            emit_expr(f, right, locals, fn_indices, import_sigs, data, next_data_offset)?;
+            let lt = infer_val_type(left, locals, import_rets, fn_rets);
+            let rt = infer_val_type(right, locals, import_rets, fn_rets);
+            let use_f64 = lt == ValType::F64 || rt == ValType::F64;
+
+            emit_expr(f, left, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+            if use_f64 && lt == ValType::I32 {
+                f.instruction(&Instruction::F64ConvertI32S);
+            }
+
+            emit_expr(f, right, locals, fn_indices, import_sigs, import_rets, fn_rets, data, next_data_offset)?;
+            if use_f64 && rt == ValType::I32 {
+                f.instruction(&Instruction::F64ConvertI32S);
+            }
+
             match op {
-                BinOp::Add => f.instruction(&Instruction::I32Add),
-                BinOp::Sub => f.instruction(&Instruction::I32Sub),
-                BinOp::Mul => f.instruction(&Instruction::I32Mul),
-                BinOp::Div => f.instruction(&Instruction::I32DivS),
-            };
+                BinOp::Add => {
+                    if use_f64 { f.instruction(&Instruction::F64Add); } else { f.instruction(&Instruction::I32Add); }
+                }
+                BinOp::Sub => {
+                    if use_f64 { f.instruction(&Instruction::F64Sub); } else { f.instruction(&Instruction::I32Sub); }
+                }
+                BinOp::Mul => {
+                    if use_f64 { f.instruction(&Instruction::F64Mul); } else { f.instruction(&Instruction::I32Mul); }
+                }
+                BinOp::Div => {
+                    if use_f64 { f.instruction(&Instruction::F64Div); } else { f.instruction(&Instruction::I32DivS); }
+                }
+                BinOp::Eq => {
+                    if use_f64 { f.instruction(&Instruction::F64Eq); } else { f.instruction(&Instruction::I32Eq); }
+                }
+                BinOp::Ne => {
+                    if use_f64 { f.instruction(&Instruction::F64Ne); } else { f.instruction(&Instruction::I32Ne); }
+                }
+                BinOp::Lt => {
+                    if use_f64 { f.instruction(&Instruction::F64Lt); } else { f.instruction(&Instruction::I32LtS); }
+                }
+                BinOp::Le => {
+                    if use_f64 { f.instruction(&Instruction::F64Le); } else { f.instruction(&Instruction::I32LeS); }
+                }
+                BinOp::Gt => {
+                    if use_f64 { f.instruction(&Instruction::F64Gt); } else { f.instruction(&Instruction::I32GtS); }
+                }
+                BinOp::Ge => {
+                    if use_f64 { f.instruction(&Instruction::F64Ge); } else { f.instruction(&Instruction::I32GeS); }
+                }
+            }
             Ok(())
         }
     }
 }
+

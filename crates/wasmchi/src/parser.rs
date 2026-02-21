@@ -114,6 +114,10 @@ impl Parser {
                 self.i += 1;
                 Ok(Type::Void)
             }
+            lexer::TokenKind::Ident(s) if s == "bool" => {
+                self.i += 1;
+                Ok(Type::Bool)
+            }
             _ => Err(self.err("expected type")),
         }
     }
@@ -125,12 +129,17 @@ impl Parser {
                 self.skip_newlines();
                 continue;
             }
-            stmts.push(self.parse_stmt()?);
-            // v0: statement separator is newline or '}'
+            let stmt = self.parse_stmt()?;
+            // if/while end with '}', no newline required after
+            let is_block_stmt = matches!(stmt, Stmt::If { .. } | Stmt::While { .. });
+            stmts.push(stmt);
+            // statement separator is newline or '}'
             if matches!(self.peek().kind, lexer::TokenKind::Newline) {
                 self.skip_newlines();
             } else if matches!(self.peek().kind, lexer::TokenKind::RBrace) {
                 // ok
+            } else if is_block_stmt {
+                // block statements don't need a trailing newline
             } else {
                 return Err(self.err("expected newline"));
             }
@@ -151,6 +160,33 @@ impl Parser {
                 self.i += 1;
                 let expr = self.parse_expr()?;
                 Ok(Stmt::Return(expr))
+            }
+            lexer::TokenKind::If => {
+                self.i += 1;
+                let cond = self.parse_expr()?;
+                self.expect(lexer::TokenKind::LBrace, "{")?;
+                self.skip_newlines();
+                let then_body = self.parse_block_stmts()?;
+                self.expect(lexer::TokenKind::RBrace, "}")?;
+                let else_body = if self.eat(lexer::TokenKind::Else) {
+                    self.expect(lexer::TokenKind::LBrace, "{")?;
+                    self.skip_newlines();
+                    let body = self.parse_block_stmts()?;
+                    self.expect(lexer::TokenKind::RBrace, "}")?;
+                    Some(body)
+                } else {
+                    None
+                };
+                Ok(Stmt::If { cond, then_body, else_body })
+            }
+            lexer::TokenKind::While => {
+                self.i += 1;
+                let cond = self.parse_expr()?;
+                self.expect(lexer::TokenKind::LBrace, "{")?;
+                self.skip_newlines();
+                let body = self.parse_block_stmts()?;
+                self.expect(lexer::TokenKind::RBrace, "}")?;
+                Ok(Stmt::While { cond, body })
             }
             lexer::TokenKind::Ident(s) if s == "print" => {
                 // print(<expr>) as statement
@@ -183,7 +219,26 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_add_sub()
+        self.parse_compare()
+    }
+
+    fn parse_compare(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_add_sub()?;
+        loop {
+            let op = match self.peek().kind {
+                lexer::TokenKind::EqEq => BinOp::Eq,
+                lexer::TokenKind::BangEq => BinOp::Ne,
+                lexer::TokenKind::Lt => BinOp::Lt,
+                lexer::TokenKind::LtEq => BinOp::Le,
+                lexer::TokenKind::Gt => BinOp::Gt,
+                lexer::TokenKind::GtEq => BinOp::Ge,
+                _ => break,
+            };
+            self.i += 1;
+            let right = self.parse_add_sub()?;
+            expr = Expr::Binary { op, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
     }
 
     fn parse_add_sub(&mut self) -> Result<Expr, ParseError> {
@@ -227,6 +282,19 @@ impl Parser {
                 let n = *n;
                 self.i += 1;
                 Ok(Expr::Int(n))
+            }
+            lexer::TokenKind::Float(bits) => {
+                let bits = *bits;
+                self.i += 1;
+                Ok(Expr::Float(bits))
+            }
+            lexer::TokenKind::True => {
+                self.i += 1;
+                Ok(Expr::Bool(true))
+            }
+            lexer::TokenKind::False => {
+                self.i += 1;
+                Ok(Expr::Bool(false))
             }
             lexer::TokenKind::Str(s) => {
                 let s = s.clone();
