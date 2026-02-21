@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
     Export,
+    Import,
     Fn,
     Let,
     Return,
@@ -125,6 +126,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     let s = &source[start..i];
                     let kind = match s {
                         "export" => TokenKind::Export,
+                        "import" => TokenKind::Import,
                         "fn" => TokenKind::Fn,
                         "let" => TokenKind::Let,
                         "return" => TokenKind::Return,

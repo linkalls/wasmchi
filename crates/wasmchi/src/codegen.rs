@@ -6,7 +6,7 @@ use wasm_encoder::{
     ValType,
 };
 
-use crate::ast::{BinOp, Expr, Item, Program, Stmt, Type};
+use crate::ast::{BinOp, Expr, ImportFn, Item, Program, Stmt, Type};
 use crate::ast::Function as AstFunction;
 
 #[derive(Debug, Error)]
@@ -24,10 +24,12 @@ pub enum CodegenError {
 }
 
 pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
-    // Collect functions in source order; allow both exported and non-exported.
+    // Collect imports + functions in source order.
+    let mut imports: Vec<&ImportFn> = Vec::new();
     let mut fns: Vec<(&AstFunction, bool)> = Vec::new();
     for item in &program.items {
         match item {
+            Item::ImportFn(i) => imports.push(i),
             Item::ExportFn(f) => fns.push((f, true)),
             Item::Fn(f) => fns.push((f, false)),
         }
@@ -41,7 +43,17 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
         return Err(CodegenError::UnsupportedType);
     }
 
-    // v0: only i32 params/returns for user functions.
+    // v0: only i32 params/returns for user functions and imports (except print).
+    for imp in &imports {
+        if imp.ret_ty != Type::I32 {
+            return Err(CodegenError::UnsupportedType);
+        }
+        for p in &imp.params {
+            if p.ty != Type::I32 {
+                return Err(CodegenError::UnsupportedType);
+            }
+        }
+    }
     for (f, _) in &fns {
         if f.ret_ty != Type::I32 {
             return Err(CodegenError::UnsupportedType);
@@ -61,7 +73,16 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     let print_ty = types.len();
     types.ty().function([ValType::I32, ValType::I32], []);
 
-    // function types for user fns (one per fn for now)
+    // type indices for imported fns
+    let mut import_type_indices: Vec<u32> = Vec::new();
+    for imp in &imports {
+        let idx = types.len();
+        let params = std::iter::repeat(ValType::I32).take(imp.params.len());
+        types.ty().function(params, [ValType::I32]);
+        import_type_indices.push(idx);
+    }
+
+    // function types for user fns
     let mut fn_type_indices: Vec<u32> = Vec::new();
     for (f, _) in &fns {
         let idx = types.len();
@@ -72,11 +93,14 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
     module.section(&types);
 
     // imports
-    let mut imports = ImportSection::new();
-    imports.import("env", "print", wasm_encoder::EntityType::Function(print_ty));
-    module.section(&imports);
+    let mut import_section = ImportSection::new();
+    import_section.import("env", "print", wasm_encoder::EntityType::Function(print_ty));
+    for (imp, ty) in imports.iter().zip(import_type_indices.iter()) {
+        import_section.import("env", &imp.name, wasm_encoder::EntityType::Function(*ty));
+    }
+    module.section(&import_section);
 
-    // functions
+    // functions (defined)
     let mut functions = FunctionSection::new();
     for ty in &fn_type_indices {
         functions.function(*ty);
@@ -96,10 +120,11 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
 
     // exports
     let mut exports = ExportSection::new();
-    // function index space: imported print = 0, then user fns start at 1 in the same order
+    // function index space: imported print=0, then imported fns, then defined fns
+    let defined_base = 1 + imports.len() as u32;
     for (i, (f, is_export)) in fns.iter().enumerate() {
         if *is_export {
-            exports.export(&f.name, ExportKind::Func, 1 + i as u32);
+            exports.export(&f.name, ExportKind::Func, defined_base + i as u32);
         }
     }
     exports.export("memory", ExportKind::Memory, 0);
@@ -111,8 +136,14 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, CodegenError> {
 
     // name -> func index
     let mut fn_indices = std::collections::HashMap::<String, u32>::new();
+    // imported functions
+    for (i, imp) in imports.iter().enumerate() {
+        fn_indices.insert(imp.name.clone(), 1 + i as u32);
+    }
+    // defined functions
+    let defined_base = 1 + imports.len() as u32;
     for (i, (f, _)) in fns.iter().enumerate() {
-        fn_indices.insert(f.name.clone(), 1 + i as u32);
+        fn_indices.insert(f.name.clone(), defined_base + i as u32);
     }
 
     // code

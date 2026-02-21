@@ -35,13 +35,33 @@ impl Parser {
         if self.eat_export() {
             let f = self.parse_fn_after_export()?;
             Ok(Item::ExportFn(f))
+        } else if matches!(self.peek().kind, lexer::TokenKind::Import) {
+            self.i += 1; // import
+            self.expect_fn()?;
+            let import = self.parse_import_fn_rest()?;
+            Ok(Item::ImportFn(import))
         } else if matches!(self.peek().kind, lexer::TokenKind::Fn) {
             self.expect_fn()?;
             let f = self.parse_fn_rest()?;
             Ok(Item::Fn(f))
         } else {
-            Err(self.err("expected 'export' or 'fn'"))
+            Err(self.err("expected 'export' or 'import' or 'fn'"))
         }
+    }
+
+    fn parse_import_fn_rest(&mut self) -> Result<ImportFn, ParseError> {
+        let name = self.expect_ident()?;
+        self.expect(lexer::TokenKind::LParen, "(")?;
+        let params = self.parse_params_ts()?;
+        self.expect(lexer::TokenKind::RParen, ")")?;
+
+        let ret_ty = if self.eat(lexer::TokenKind::Colon) {
+            self.parse_type()?
+        } else {
+            self.parse_type()?
+        };
+
+        Ok(ImportFn { name, params, ret_ty })
     }
 
     fn parse_fn_after_export(&mut self) -> Result<Function, ParseError> {

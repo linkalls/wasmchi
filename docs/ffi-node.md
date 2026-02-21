@@ -32,6 +32,6 @@ export default {
 > Put your `package.json` + `node_modules` there (or run from a project dir).
 
 ## Next steps
-- Add `import fn ... from "env"` syntax in wasmchi source
+- (done) Add `import fn ...` syntax in wasmchi source (v0: module is fixed to `env`)
 - Typecheck imports/exports
 - Support string arguments/returns via `(ptr,len)` ABI (UTF-8)

@@ -7,6 +7,14 @@ pub struct Program {
 pub enum Item {
     ExportFn(Function),
     Fn(Function),
+    ImportFn(ImportFn),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportFn {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret_ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

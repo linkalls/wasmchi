@@ -15,6 +15,10 @@
 
 ## 3. Syntax (v0)
 ### Top-level
+- Import:
+  - `import fn <name>(<params>): <type>`
+  - `import fn <name>(<params>) <type>`
+  - module名は v0 では固定で `env`（Node/Browserホスト側の `env.<name>` に繋がる）
 - Function:
   - TS風: `fn <name>(<params>): <type> { <stmts> }`
   - V風:  `fn <name>(<params>) <type> { <stmts> }`
