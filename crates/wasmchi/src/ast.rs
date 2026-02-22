@@ -66,6 +66,9 @@ pub enum Expr {
     // Property access
     Dot { base: Box<Expr>, prop: String },
 
+    // Unary
+    Not(Box<Expr>),
+
     Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
 }
 
@@ -81,4 +84,6 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    And,
+    Or,
 }

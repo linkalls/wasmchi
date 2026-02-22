@@ -31,11 +31,14 @@ pub enum TokenKind {
     Comma,
     Dot,
     EqEq,
+    Bang,
     BangEq,
     Lt,
     LtEq,
     Gt,
     GtEq,
+    AmpAmp,
+    PipePipe,
 
     Newline,
     Eof,
@@ -104,6 +107,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     tokens.push(Token { kind: TokenKind::BangEq, pos: i });
                     i += 2;
                 } else {
+                    tokens.push(Token { kind: TokenKind::Bang, pos: i });
                     i += 1;
                 }
             }
@@ -122,6 +126,22 @@ pub fn lex(source: &str) -> Vec<Token> {
                     i += 2;
                 } else {
                     tokens.push(Token { kind: TokenKind::Gt, pos: i });
+                    i += 1;
+                }
+            }
+            b'&' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
+                    tokens.push(Token { kind: TokenKind::AmpAmp, pos: i });
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            b'|' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+                    tokens.push(Token { kind: TokenKind::PipePipe, pos: i });
+                    i += 2;
+                } else {
                     i += 1;
                 }
             }
